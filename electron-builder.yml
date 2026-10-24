@@ -1,0 +1,52 @@
+appId: dev.stellarsteader.endurance
+productName: Endurance
+artifactName: Endurance-${version}-${arch}.${ext}
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+  - "!node_modules/**"
+  # The terminal's PTY (electron/terminal-host) is the one dependency loaded at run time: a prebuilt N-API binary, so
+  # it is not rebuilt for Electron. Its binary and spawn-helper (which it executes) cannot run from inside the asar.
+  - node_modules/@lydell/node-pty/**
+  - node_modules/@lydell/node-pty-darwin-*/**
+asarUnpack:
+  - node_modules/@lydell/node-pty-darwin-*/prebuilds/**
+npmRebuild: false
+# History is encrypted with a key the system keychain gives only to this app. These switches would let another
+# program run this binary as Node or attach a debugger and be handed that key, so they are off.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+extraResources:
+  - from: LICENSE
+    to: licenses/LICENSE
+  - from: src/harness/vendor/LICENSE
+    to: licenses/endurance-core-LICENSE
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  darkModeSupport: true
+  # No certificate signing by default (CI, releases, anyone without a certificate). `null` also makes electron-builder ignore
+  # CSC_NAME and certificate auto-discovery. `npm run package:mac:local` overrides it on the command line with
+  # ENDURANCE_SIGNING_IDENTITY so a local build keeps one signature across rebuilds; see README "Signing your own builds".
+  identity: null
+  extendInfo:
+    NSMicrophoneUsageDescription: Record voice messages in Endurance.
+dmg:
+  title: Endurance
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+linux:
+  category: Utility
+  target:
+    - target: AppImage
+      arch: [x64]

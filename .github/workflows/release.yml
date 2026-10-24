@@ -1,0 +1,64 @@
+name: Release packages
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+
+  package:
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: mac
+            arch: arm64
+            extension: dmg
+          - runner: macos-15-intel
+            platform: mac
+            arch: x64
+            extension: dmg
+          - runner: windows-latest
+            platform: win
+            arch: x64
+            extension: exe
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            extension: AppImage
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Check release tag matches package version
+        shell: bash
+        run: node --input-type=module -e 'import p from "./package.json" with { type:"json" }; if (process.env.GITHUB_REF_NAME !== `v${p.version}`) throw new Error("Tag must match package.json version");'
+      - run: npm ci
+      - run: npm run build
+      - name: Package without signing or publication
+        run: npx electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never --config electron-builder.yml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endurance-${{ github.ref_name }}-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release/*.${{ matrix.extension }}
+          if-no-files-found: error
+          retention-days: 14

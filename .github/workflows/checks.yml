@@ -1,0 +1,48 @@
+name: Checks
+
+# Pull requests get the quick checks on Ubuntu. The macOS build runs by hand and before a release (release.yml).
+# The tests are kept outside this repository, so CI checks types, lint and the build.
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Types and platform lint
+        run: npm run typecheck && npm run lint:desktop
+
+  build:
+    if: github.event_name != 'pull_request'
+    needs: check
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Build bundled application
+        run: npm run build

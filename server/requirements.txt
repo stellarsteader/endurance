@@ -1,0 +1,6 @@
+# Pinned to the versions the tests ran with (server/tests). Update together and run the tests again.
+fastapi==0.160.0
+uvicorn==0.54.0
+httpx==0.28.1
+docker==7.2.0
+huggingface-hub==2.2.0

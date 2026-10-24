@@ -1,0 +1,22 @@
+# The manager; model containers are started by it on the same network (server/manager/containers.py).
+name: endurance
+services:
+  manager:
+    build: .
+    image: endurance-vllm-manager:1
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HF_HOME: /hf
+      STATE_DIR: /state
+      DOCKER_NETWORK: endurance
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_HF_HOME}:/hf
+      - ./state:/state
+    ports:
+      - "${PORT:-8100}:8100"
+    networks: [endurance]
+networks:
+  endurance:
+    name: endurance
