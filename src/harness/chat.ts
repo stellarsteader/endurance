@@ -8,7 +8,7 @@ import { Ollama } from "./vendor/schema/ollama";
 import { OllamaChat } from "./ollama-chat";
 import { Message, type ContentPart, type LLMEvent } from "./vendor/llm/schema";
 import { endpoint } from "./runtime";
-import { compactHistory, summaryMessage } from "./compaction";
+import { carryCounts, compactHistory, summaryMessage } from "./compaction";
 import { skillCatalog, type SkillEntry } from "./skills";
 import { streamReply } from "./reply";
 import { thinkingRequest } from "./thinking";
@@ -20,18 +20,21 @@ import { attachmentId, documentFormat, imageFormat, SENT_IMAGE_FORMATS } from ".
 import { tuned } from "./sampling";
 import { describeFailure } from "./failure";
 import { runAs } from "./limit";
-import type { AppUIMessage, ChatSettings, Usage } from "../lib/types";
+import type { AppUIMessage, Approval, ChatSettings, Usage } from "../lib/types";
 import type { CompactResult } from "../lib/desktop";
 import { estimateText } from "../lib/token-estimate";
 import { fitInstructions } from "./instructions";
 import { breakdownOf } from "./breakdown";
+import type { CallInfo } from "./guarded";
 import type { ThinkingSwitchChoice } from "../lib/thinking-switch";
 import type { SamplingSets } from "../lib/sampling";
 import { runtimeName, type RuntimeConnection, type RuntimeId, type ServerLocation } from "../lib/models";
 
-export interface ChatRequest extends ChatSettings {
+export interface ChatRequest extends Omit<ChatSettings, "defaultApproval"> {
   /** The chat's ID; a side chat has its own. Requests for the chat on screen go first (see ./limit). */
   id?: string;
+  /** This chat's approval mode. */
+  approval: Approval;
   messages: AppUIMessage[];
   runtime: RuntimeId;
   runtimeModelId: string;
@@ -85,11 +88,73 @@ export function plainChatNote(body: Pick<ChatRequest, "projectName">) {
 }
 
 /** The text of the latest user message, which decides which skills are listed first. */
+/**
+ * Two calls of one reply, as when an answer that filled the window went on in another call. What the reply took adds
+ * up; the window is what the later call saw; and since neither call wrote the whole reply, its own count is unknown.
+ */
+/** The answer's usage with the summaries made for it added to its totals; the window stays the answer's. */
+const withSide = (answer: Usage, side: Usage): Usage => ({
+  ...answer,
+  input: answer.input + side.input,
+  output: answer.output + side.output,
+  reasoning: answer.reasoning + side.reasoning,
+  cached: answer.cached + side.cached,
+  calls: (answer.calls ?? 1) + (side.calls ?? 0),
+  ...(answer.decodeMs || side.decodeMs ? { decodeMs: (answer.decodeMs ?? 0) + (side.decodeMs ?? 0) } : {}),
+});
+
+function joinUsage(a: Usage, b: Usage): Usage {
+  const decodeMs = (a.decodeMs ?? 0) + (b.decodeMs ?? 0);
+  const { reply: _reply, first: _first, ...later } = b;
+  void _reply;
+  void _first;
+  return {
+    ...later,
+    // The first call's count stays the turn's own; the later call's prompt held the answer written so far.
+    ...(a.first !== undefined ? { first: a.first } : {}),
+    input: a.input + b.input,
+    output: a.output + b.output,
+    reasoning: a.reasoning + b.reasoning,
+    cached: a.cached + b.cached,
+    calls: (a.calls ?? 1) + (b.calls ?? 1),
+    ...(decodeMs ? { decodeMs } : {}),
+    ...(a.estimated || b.estimated ? { estimated: true } : {}),
+  };
+}
+
+/**
+ * A call made for a reply besides its answer, such as a summary: what it took adds to the reply's totals, while the
+ * window and the reply's own count stay those of the answer's calls.
+ */
+export function addSideUsage(total: Usage, usage: Extract<LLMEvent, { type: "finish" }>["usage"], call?: CallInfo) {
+  if (!usage) return;
+  total.input += usage.inputTokens ?? 0;
+  total.reasoning += usage.reasoningTokens ?? 0;
+  total.output += Math.max(0, (usage.outputTokens ?? 0) - (usage.reasoningTokens ?? 0));
+  total.cached += usage.cacheReadInputTokens ?? 0;
+  total.calls = (total.calls ?? 0) + 1;
+  if (call?.decodeMs) total.decodeMs = (total.decodeMs ?? 0) + call.decodeMs;
+}
+
 /** A single-call turn: its prompt and visible reply are what now fills the window. */
-export function turnUsage(usage: Extract<LLMEvent, { type: "finish" }>["usage"], window?: number): Usage {
+export function turnUsage(usage: Extract<LLMEvent, { type: "finish" }>["usage"], window?: number, call?: CallInfo): Usage {
   const output = Math.max(0, (usage?.outputTokens ?? 0) - (usage?.reasoningTokens ?? 0));
   const input = usage?.inputTokens ?? 0;
-  return { input, output, reasoning: usage?.reasoningTokens ?? 0, cached: usage?.cacheReadInputTokens ?? 0, context: input + output, calls: 1, ...(window ? { window } : {}), ...(isEstimatedPrompt(usage) ? { estimated: true } : {}) };
+  // The reply's own count, only when neither thinking nor tool arguments are folded into it (see Usage.reply).
+  const exact = !!call && usage?.outputTokens !== undefined && (usage.reasoningTokens !== undefined || !call.thought) && !call.tools;
+  return {
+    input,
+    output,
+    reasoning: usage?.reasoningTokens ?? 0,
+    cached: usage?.cacheReadInputTokens ?? 0,
+    context: input + output,
+    calls: 1,
+    ...(usage?.inputTokens !== undefined && !isEstimatedPrompt(usage) ? { first: usage.inputTokens } : {}),
+    ...(exact ? { reply: output } : {}),
+    ...(call?.decodeMs ? { decodeMs: call.decodeMs } : {}),
+    ...(window ? { window } : {}),
+    ...(isEstimatedPrompt(usage) ? { estimated: true } : {}),
+  };
 }
 
 export function requestText(messages: AppUIMessage[]) {
@@ -242,7 +307,10 @@ export async function chatResponse(request: Request) {
   }
   const started = Date.now();
   let finishReason: FinishReason = "stop";
-  let reportedUsage: Extract<LLMEvent, { type: "finish" }>['usage'];
+  // Every call of the reply: one usually, more when an answer that filled the window went on in another call.
+  const reported: { usage: NonNullable<Extract<LLMEvent, { type: "finish" }>["usage"]>; call?: CallInfo }[] = [];
+  // Summaries made for this reply, counted in what it took.
+  const side: Usage = { input: 0, output: 0, reasoning: 0, cached: 0 };
   const stream = createUIMessageStream<AppUIMessage>({
     originalMessages: raw.messages,
     onError: describeFailure,
@@ -271,9 +339,15 @@ export async function chatResponse(request: Request) {
       const send = async (window: number | undefined) => {
         // Summarized only when the conversation and the room this model's answers take would not fit.
         const fitted = { ...body, contextWindow: window };
-        const { budget } = await measure(fitted, system, [], Boolean(body.reasoningSupported) && !thinkingOff(body));
-        const compact = async (extra: number) => compactHistory({ messages: body.messages, contextWindow: budget.window || window, system: estimateText(system) + extra, reserve: budget.reserve, model, layer, signal: request.signal, writer, thinking: await thinkingRequest(body, false), connection: body.connection, tune: (maxTokens) => tuned(body, false, { maxTokens }) });
-        const conversation = (history: Awaited<ReturnType<typeof compact>>) => [...(history.summary ? [summaryMessage(history.summary)] : []), ...toMessages(history.rest, { vision: body.visionSupported })];
+        const thinks = Boolean(body.reasoningSupported) && !thinkingOff(body);
+        const { budget, ratio } = await measure(fitted, system, [], thinks);
+        // A summary thinks as the chat does, within the output every call of this model keeps free.
+        const compact = async (extra: number) => compactHistory({ messages: body.messages, contextWindow: budget.window || window, system: estimateText(system) + extra, reserve: budget.reserve, model, layer, signal: request.signal, writer, thinking: await thinkingRequest(body, thinks), thinks, ratio, connection: body.connection, tune: (maxTokens) => tuned(body, thinks, { maxTokens }), onUsage: (usage, call) => addSideUsage(side, usage, call) });
+        const conversation = (history: Awaited<ReturnType<typeof compact>>) => {
+          const sent = [...(history.summary ? [summaryMessage(history.summary)] : []), ...toMessages(history.rest, { vision: body.visionSupported })];
+          carryCounts(sent, body.messages);
+          return sent;
+        };
         const history = await compact(0);
         // Older turns are summarized at most once per request, so a summary is never summarized again.
         let compacted = Boolean(history.data);
@@ -281,7 +355,7 @@ export async function chatResponse(request: Request) {
         sent = { messages, summary: history.summary ? messages[0] : undefined };
         return streamReply({
           body: fitted, system, messages, writer, signal: request.signal,
-          onUsage: (usage) => { reportedUsage = usage; },
+          onUsage: (usage, call) => { if (usage) reported.push({ usage, call }); },
           rejectToolCalls: "Tool execution has not been connected to the local harness yet.",
           // An answer that filled the window needs room beside the conversation to go on.
           makeRoom: async (answer) => {
@@ -316,7 +390,8 @@ export async function chatResponse(request: Request) {
         writer.write({ type: "data-toast", data: { message: IMAGES_LEFT_OUT }, transient: true });
         finishReason = await attempt();
       }
-      const usage = reportedUsage ? turnUsage(reportedUsage, window) : undefined;
+      const answered = reported.length ? reported.map((item) => turnUsage(item.usage, window, item.call)).reduce(joinUsage) : undefined;
+      const usage = answered && side.calls ? withSide(answered, side) : answered;
       const breakdown = breakdownOf({ system: [identity(body), plainChatNote(body), imageNote(body)].filter(Boolean).join("\n\n"), instructions: instructions.text, skills }, 0, sent.messages, sent.messages.length, sent.summary);
       if (usage?.output) breakdown.reply = usage.output;
       writer.write({ type: "finish", finishReason, messageMetadata: { model: body.model, durationMs: Date.now() - started, usage, breakdown } });
@@ -331,8 +406,11 @@ export async function chatResponse(request: Request) {
 export async function compactChat(raw: ChatRequest, signal: AbortSignal): Promise<CompactResult> {
   validate(raw);
   const body = await withLiveWindow(raw);
-  const thinking = await thinkingRequest(body, false);
-  // Asked for in the chat, so it waits in line as that chat.
+  const thinks = Boolean(body.reasoningSupported) && !thinkingOff(body);
+  const thinking = await thinkingRequest(body, thinks);
+  const { budget, ratio } = await measure(body, identity(body), [], thinks);
+  // Asked for in the chat, so it waits in line as that chat. What it took is kept with the summary (CompactionData.usage).
+  const usage: Usage = { input: 0, output: 0, reasoning: 0, cached: 0 };
   const result = await runAs({ chat: raw.id, kind: "chat" }, () => compactHistory({
     messages: body.messages,
     contextWindow: body.contextWindow,
@@ -343,8 +421,12 @@ export async function compactChat(raw: ChatRequest, signal: AbortSignal): Promis
     signal,
     force: true,
     thinking,
+    thinks,
+    ratio,
+    reserve: budget.reserve,
     connection: body.connection,
-    tune: (maxTokens) => tuned(body, false, { maxTokens }),
+    tune: (maxTokens) => tuned(body, thinks, { maxTokens }),
+    onUsage: (reported, call) => addSideUsage(usage, reported, call),
   }));
-  return result.data ? { data: result.data } : { skipped: result.skipped === "failed" ? "failed" : "short" };
+  return result.data ? { data: { ...result.data, ...(usage.calls ? { usage } : {}) } } : { skipped: result.skipped === "failed" ? "failed" : "short" };
 }

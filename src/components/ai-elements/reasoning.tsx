@@ -199,7 +199,7 @@ export const ReasoningContent = memo(
       data-thought=""
       {...props}
     >
-      <Streamdown components={markdownComponents} controls={false} plugins={streamdownPlugins}>
+      <Streamdown className="chat-text" components={markdownComponents} controls={false} plugins={streamdownPlugins}>
         {children}
       </Streamdown>
     </CollapsibleContent>

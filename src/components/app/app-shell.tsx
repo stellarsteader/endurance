@@ -15,6 +15,7 @@ import { LibraryPage } from "./library";
 import { HistorySettings, RecoveryNudge } from "./history-settings";
 import { VoiceSettings } from "./voice-settings";
 import { GeneralSettings } from "./general-settings";
+import { PermissionsSettings } from "./permissions-settings";
 import { VaultGate } from "./vault-gate";
 import { CommandPalette } from "./command-palette";
 import { openFindInChat } from "./find-bar";
@@ -153,6 +154,8 @@ function Layout() {
                 <HistorySettings />
               ) : settingsSection === "voice" ? (
                 <VoiceSettings />
+              ) : settingsSection === "permissions" ? (
+                <PermissionsSettings />
               ) : (
                 <div className="h-full" />
               )}

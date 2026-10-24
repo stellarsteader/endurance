@@ -11,7 +11,7 @@ import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import type { HistoryRequest, HistorySession, HistorySettings, RequestStatus, SessionInput } from "../lib/history-api";
 import { MAX_INSTRUCTIONS, type StoredProject } from "../lib/workspace-api";
-import { isEffort, type AppUIMessage, type ChatChoice } from "../lib/types";
+import { isApproval, isEffort, type AppUIMessage, type ChatChoice } from "../lib/types";
 import { sanitizePolicy } from "../lib/workspace-policy";
 import type { Vault } from "./vault";
 
@@ -55,13 +55,14 @@ interface StoredMessage {
 const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : 0);
 const validId = (value: unknown): value is string => typeof value === "string" && ID.test(value);
 
-/** A chat's own model and effort as stored: only well-formed fields, or nothing. */
+/** A chat's own model, effort and approval mode as stored: only well-formed fields, or nothing. */
 function cleanChoice(value: unknown): ChatChoice | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const { model, effort } = value as Record<string, unknown>;
+  const { model, effort, approval } = value as Record<string, unknown>;
   const choice: ChatChoice = {
     ...(typeof model === "string" && model && model.length <= 600 ? { model } : {}),
     ...(isEffort(effort) ? { effort } : {}),
+    ...(isApproval(approval) ? { approval } : {}),
   };
   return Object.keys(choice).length ? choice : undefined;
 }

@@ -84,7 +84,7 @@ try {
   }, fixtureURL);
   await page.evaluate(() => {
     const saved = JSON.parse(localStorage.getItem("endurance:v1")) ?? {};
-    saved.settings = { model: "local:vllm:fixture-chat", effort: "high", approval: "auto", webSearch: false };
+    saved.settings = { model: "local:vllm:fixture-chat", effort: "high", defaultApproval: "auto", webSearch: false };
     localStorage.setItem("endurance:v1", JSON.stringify(saved));
   });
   await page.reload();

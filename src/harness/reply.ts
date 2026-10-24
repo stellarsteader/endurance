@@ -9,7 +9,7 @@ import type { FinishReason, UIMessageStreamWriter } from "ai";
 import { request as makeRequest } from "./vendor/llm/llm";
 import type { LLMEvent, Message } from "./vendor/llm/schema";
 import { layer, modelFor, thinkingOff, type ChatRequest } from "./chat";
-import { guardedStream } from "./guarded";
+import { guardedStream, type CallInfo } from "./guarded";
 import { Stopped, type Watched } from "./loop-guard";
 import { outputPlan, withBody } from "./output";
 import { tuned } from "./sampling";
@@ -28,7 +28,7 @@ export interface ReplyOptions {
   writer: UIMessageStreamWriter<AppUIMessage>;
   signal: AbortSignal;
   /** Called with each call's reported usage; a retried reply reports twice. */
-  onUsage?: (usage: FinishUsage) => void;
+  onUsage?: (usage: FinishUsage, call?: CallInfo) => void;
   /** Turns a streamed tool call into an error, for a chat that runs no tools. */
   rejectToolCalls?: string;
   /** Frees room to continue an answer of this many tokens; see ContinueOptions.makeRoom. */
@@ -86,13 +86,13 @@ async function once(options: ReplyOptions, parts: Parts, retry: boolean) {
     signal: options.signal,
     caps: output.caps,
     maxTokens: output.maxTokens,
-    onUsage: (reported) => {
+    onUsage: (reported, call) => {
       // A count that left out the cached prompt is replaced by the estimate and teaches nothing (budget.wholePrompt).
       const { usage, trusted } = wholePrompt(reported, estimated);
       if (trusted) learnRatio(body, estimated, usage?.inputTokens);
       // A reply stopped for looping says nothing about how long this model's answers run.
       if (!retry) learnOutput(body, think && thinks(body), usage?.outputTokens);
-      options.onUsage?.(usage);
+      options.onUsage?.(usage, call);
     },
     rejectToolCalls: options.rejectToolCalls,
     onPart: (part, text) => parts.write(part, text),

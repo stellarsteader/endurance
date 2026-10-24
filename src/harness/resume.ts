@@ -8,6 +8,7 @@ import { createUIMessageStream, createUIMessageStreamResponse, type FinishReason
 import type { LLMEvent } from "./vendor/llm/schema";
 import { identity, imageNote, plainChatNote, toMessages, turnUsage, validate, type ChatRequest } from "./chat";
 import { continueAnswer } from "./continuation";
+import type { CallInfo } from "./guarded";
 import { describeFailure } from "./failure";
 import { fitInstructions } from "./instructions";
 import { runAs } from "./limit";
@@ -25,6 +26,7 @@ export async function resumeResponse(request: Request) {
   toMessages(before, { vision: raw.visionSupported });
   const started = Date.now();
   let usage: Extract<LLMEvent, { type: "finish" }>["usage"];
+  let call: CallInfo | undefined;
   const stream = createUIMessageStream<AppUIMessage>({
     originalMessages: raw.messages,
     onError: describeFailure,
@@ -51,8 +53,9 @@ export async function resumeResponse(request: Request) {
             open = true;
             writer.write({ type: "text-delta", id, delta });
           },
-          onUsage: (reported) => {
+          onUsage: (reported, info) => {
             usage = reported;
+            call = info;
           },
           // The conversation already fit when the reply started; it is not summarized again to go on.
           makeRoom: async () => undefined,
@@ -61,7 +64,9 @@ export async function resumeResponse(request: Request) {
         // Out of room: the reply ends here, with the note that offers a new turn.
         if (end.full) writer.write({ type: "data-loop", data: { part: "text", reason: "limit" } });
         const finishReason: FinishReason = end.finishReason;
-        writer.write({ type: "finish", finishReason, messageMetadata: { model: raw.model, durationMs: Date.now() - started, usage: usage ? turnUsage(usage, body.contextWindow) : undefined } });
+        // The count covers only the part written now, not the whole reply in the window, so it is not the reply's own.
+        const counted = usage ? { ...turnUsage(usage, body.contextWindow, call), reply: undefined } : undefined;
+        writer.write({ type: "finish", finishReason, messageMetadata: { model: raw.model, durationMs: Date.now() - started, usage: counted } });
       }),
   });
   return createUIMessageStreamResponse({ stream });

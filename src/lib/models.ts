@@ -191,6 +191,10 @@ export const groupOf = (m: ModelInfo): ModelGroup => m.group ?? m.connectionId ?
  */
 export const compactLine = (thinks: boolean) => 1 - (thinks ? 1 / 4 : 1 / 8);
 
+const compactNumber = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+/** A token count as the chat shows it: 999, 1.2K, 34.2K. */
+export const formatTokens = (n: number) => compactNumber.format(Math.max(0, Math.round(n)));
+
 export const formatContext = (n: number) =>
   !n
     ? "Unknown"

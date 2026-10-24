@@ -19,18 +19,17 @@ import {
 import {
   arrangeModels,
   formatContext,
-  getModel,
   groupOf,
   type ModelInfo,
 } from "@/lib/models";
 import { materialize, moveId, type DropPosition } from "@/lib/ordering";
 import { useStore } from "@/lib/store";
 import type { Effort } from "@/lib/types";
-import { effortChoices, effortLabel, resolveEffort, thinkingControl } from "@/lib/thinking-switch";
+import { effortChoices, effortLabel, resolveEffort, thinkingControl, type ThinkingControl } from "@/lib/thinking-switch";
 import { defaultEffort, runtimeContext } from "@/features/model-settings/preferences";
 import { useSession } from "./session-context";
 import { cn } from "@/lib/utils";
-import { CheckIcon, ChevronDownIcon, SearchIcon } from "lucide-react";
+import { ChevronDownIcon, SearchIcon } from "lucide-react";
 import { useCallback, useState, type ReactNode } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { LocationBadge } from "./location-badge";
@@ -62,11 +61,15 @@ const windowLabel = (m: ModelInfo) => {
   return tokens ? formatContext(tokens) : m.runtime === "ollama" ? "Auto context" : "Context unknown";
 };
 
-/** What a model shows when picked in a new chat: its window, and the thinking it starts with. */
-const defaultDetail = (m: ModelInfo) =>
-  [windowLabel(m), m.capabilities.includes("reasoning") ? effortLabel(thinkingControl(m), resolveEffort(thinkingControl(m), defaultEffort(m))) : null]
-    .filter(Boolean)
-    .join(" ");
+/** Thinking as the trigger and list name it: "Thinking", "Thinking off", or "Thinking High" for a level. */
+const thinkingTag = (control: ThinkingControl, effort: Effort) =>
+  effort === "none" ? "Thinking off" : control.kind === "toggle" ? "Thinking" : `Thinking ${effortLabel(control, effort)}`;
+
+/** The thinking a model starts a new chat with, or null for a model that does not think. */
+const defaultThinking = (m: ModelInfo) =>
+  m.capabilities.includes("reasoning") ? thinkingTag(thinkingControl(m), resolveEffort(thinkingControl(m), defaultEffort(m))) : null;
+
+const listDetail = "shrink-0 text-[12px] leading-[1.35] text-muted-foreground";
 
 function Toggle({ checked }: { checked: boolean }) {
   return (
@@ -100,24 +103,34 @@ function LocalDot() {
   return <span className="size-1.5 rounded-full bg-emerald-500 shadow-[0_0_0_3px] shadow-emerald-500/15" />;
 }
 
+/** Name and window on the left, thinking on the right. A long name is cut before the details. */
+function ModelRowText({ model, thinking }: { model: ModelInfo; thinking: string | null }) {
+  return (
+    <>
+      <span className="truncate">{model.name}</span>
+      <span className={listDetail}>{windowLabel(model)}</span>
+      <span className={cn(listDetail, "ml-auto pl-3")}>{thinking}</span>
+    </>
+  );
+}
+
+const listRow = "h-[26px] gap-1.5 rounded-md py-0 pr-2 pl-2 text-[13px] font-normal leading-none";
+
 function ModelListItem({
   model,
   selected,
-  detail,
+  thinking,
   onPick,
 }: {
   model: ModelInfo;
   selected: boolean;
-  detail?: string;
+  thinking: string | null;
   onPick: () => void;
 }) {
   return (
-    <DropdownMenuItem className="h-[26px] gap-1.5 rounded-md py-0 pr-2 pl-2 text-[13px] font-normal leading-none" onClick={onPick}>
-      <span className="truncate">{model.name}</span>
-      <span className="truncate text-[12px] leading-[1.35] text-muted-foreground">
-        {detail || model.variant || defaultDetail(model)}
-      </span>
-      <CheckIcon className={cn("ml-auto size-3.5 shrink-0", selected ? "opacity-100" : "opacity-0")} />
+    // The chosen model stays pressed, like the chosen effort level.
+    <DropdownMenuItem aria-current={selected || undefined} className={cn(listRow, selected && "bg-muted")} onClick={onPick}>
+      <ModelRowText model={model} thinking={thinking} />
     </DropdownMenuItem>
   );
 }
@@ -137,7 +150,7 @@ function DraggableModel({
   model: ModelInfo;
   reorderable: boolean;
   selected: boolean;
-  detail?: string;
+  thinking: string | null;
   onPick: () => void;
 }) {
   const spot: ModelSpot = { group: groupOf(model) };
@@ -166,7 +179,12 @@ function ModelGroupSection({ group, reorderable, children }: { group: ModelGroup
       <DropIndicator placement={placement} />
       {/* The label takes a slot like a row, so it sits as far below the row above as above its first model. */}
       <DropdownMenuGroup>
-        <DropdownMenuLabel className="flex h-[23px] items-center gap-2 px-2 py-0 text-[11px] leading-none font-normal" ref={setHandle} {...handle}>
+        {/* The label is the group's drag handle, so it shows the grab cursor rather than a text one. */}
+        <DropdownMenuLabel
+          className={cn("flex h-[23px] items-center gap-2 px-2 py-0 text-[11px] leading-none font-normal select-none", reorderable && "cursor-grab")}
+          ref={setHandle}
+          {...handle}
+        >
           {group.label}
           <span className="ml-auto flex items-center gap-1.5 font-normal">
             {group.location === "remote" ? <LocationBadge location="remote" /> : group.local && <LocalDot />}
@@ -206,8 +224,7 @@ function useModelReorder(arranged: ModelGroupView[]) {
     const model = arranged.flatMap((group) => group.models).find((m) => m.id === item.id);
     return (
       <DragCard className="h-[26px] gap-1.5">
-        <span className="truncate">{model?.name}</span>
-        {model && <span className="truncate text-[12px] text-muted-foreground">{model.variant || defaultDetail(model)}</span>}
+        {model && <ModelRowText model={model} thinking={defaultThinking(model)} />}
       </DragCard>
     );
   };
@@ -220,11 +237,12 @@ function useModelReorder(arranged: ModelGroupView[]) {
 
 function AllModels({
   current,
-  currentDetail,
+  currentThinking,
   onPick,
 }: {
   current: string;
-  currentDetail: string;
+  /** The open chat's thinking, which may differ from the model's default. */
+  currentThinking: string | null;
   onPick: (id: string) => void;
 }) {
   const models = useChatModels();
@@ -252,7 +270,12 @@ function AllModels({
           value={query}
         />
       </div>
-      <ScrollArea className="-mr-1 h-[min(20rem,calc(var(--available-height)-2.25rem))]" scrollbarClassName="w-1.5 p-0 py-1">
+      {/* As tall as the list, up to 20rem or the room on screen; past that it scrolls. */}
+      <ScrollArea
+        className="-mr-1"
+        scrollbarClassName="w-1.5 p-0 py-1"
+        viewportClassName="max-h-[min(20rem,calc(var(--available-height)-2.25rem))]"
+      >
         {/* Rows inset their text, the divider does not: this makes up the difference above the first label. */}
         <div className="pt-2 pr-1 pb-1">
           <Reorderable {...reorder}>
@@ -263,12 +286,12 @@ function AllModels({
                 <ModelGroupSection group={group} key={group.id} reorderable={reorderable}>
                   {items.map((m) => (
                     <DraggableModel
-                      detail={m.id === current ? currentDetail : undefined}
                       key={m.id}
                       model={m}
                       onPick={() => onPick(m.id)}
                       reorderable={reorderable}
                       selected={m.id === current}
+                      thinking={m.id === current ? currentThinking : defaultThinking(m)}
                     />
                   ))}
                 </ModelGroupSection>
@@ -278,6 +301,14 @@ function AllModels({
           {models.every((m) => !matches(m)) && (
             <div className="px-2.5 py-6 text-center text-muted-foreground text-sm">No models match “{query}”.</div>
           )}
+          {/* Every row, unseen, so the card keeps the width of the longest one while a search filters the list. */}
+          <div aria-hidden className="invisible h-0 overflow-hidden">
+            {models.map((m) => (
+              <div className={cn(listRow, "flex items-center")} key={m.id}>
+                <ModelRowText model={m} thinking={m.id === current ? currentThinking : defaultThinking(m)} />
+              </div>
+            ))}
+          </div>
         </div>
       </ScrollArea>
     </>
@@ -297,7 +328,8 @@ export function ModelEffortMenu() {
     setOpen(false);
   };
 
-  const detail = [model.runtime ? windowLabel(model) : null, reasons ? effortLabel(control, effort) : null].filter(Boolean).join(" ");
+  const thinking = reasons ? thinkingTag(control, effort) : null;
+  const detail = [model.runtime ? windowLabel(model) : null, thinking].filter(Boolean).join(" ");
 
   return (
     <DropdownMenu onOpenChange={setOpen} open={open}>
@@ -349,10 +381,10 @@ export function ModelEffortMenu() {
           </DropdownMenuSubTrigger>
           <DropdownMenuSubContent
             align="end"
-            className="w-[min(15.5rem,var(--available-width))] overflow-hidden p-1 pt-1.5"
+            className="w-max min-w-[min(15.5rem,var(--available-width))] max-w-[min(22rem,var(--available-width))] overflow-hidden p-1 pt-1.5"
             {...BESIDE}
           >
-            <AllModels current={model.id} currentDetail={detail} onPick={pick} />
+            <AllModels current={model.id} currentThinking={thinking} onPick={pick} />
           </DropdownMenuSubContent>
         </DropdownMenuSub>
       </DropdownMenuContent>

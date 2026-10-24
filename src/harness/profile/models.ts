@@ -9,7 +9,7 @@ import { endpoint } from "../runtime";
 import { runtimeProfile, type ModelFacts, type RuntimeProfile } from "./runtimes";
 import { observedDefault, resolveWindow, type WindowSource } from "../../lib/context-window";
 import { knobNamed, thinkingKnob, type Knob } from "./template";
-import { budgetFor, outputCap, requestTokens } from "../budget";
+import { budgetFor, countedTokens, outputCap, requestTokens, type Anchor } from "../budget";
 import type { Message } from "../vendor/llm/schema";
 
 /** How long runtime facts are reused: long enough for one turn's calls, short enough to see a reload. */
@@ -210,10 +210,11 @@ export function windowFromError(message: string): number | undefined {
  * The request's estimated size, unscaled (to compare with what the runtime reports) and scaled by what it
  * reported before, and the room the window leaves for output.
  */
-export async function measure(body: ChatRequest, system: string, messages: readonly Message[], thinking = true, extra = 0) {
+export async function measure(body: ChatRequest, system: string, messages: readonly Message[], thinking = true, extra = 0, anchor?: Anchor) {
   const profile = await modelProfile(body);
+  // The estimate alone is what the runtime's count teaches the ratio from; the input uses its counts where there are any.
   const estimated = requestTokens(system, messages, 1, extra);
-  const input = Math.ceil(estimated * profile.ratio);
+  const input = countedTokens(system, messages, profile.ratio, extra, anchor);
   const observed = observedOutput(body, thinking);
   // The profile's window already takes in one the runtime named when a request did not fit.
   const budget = budgetFor(profile.window ?? body.contextWindow, observed, thinking);

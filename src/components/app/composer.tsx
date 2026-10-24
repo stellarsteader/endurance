@@ -94,16 +94,18 @@ function slashCommands(runtime: boolean): MenuItem[] {
   ];
 }
 
-/** What the agent does in each mode (src/harness/agent.ts). Modes differ only in going online. */
-const APPROVALS: { id: Approval; label: string; hint: string; icon: typeof HandIcon; danger?: boolean }[] = [
-  { id: "ask", label: "Ask for approval", hint: "Ask before a reply first searches the web, opens a page or delegates web work", icon: HandIcon },
-  { id: "auto", label: "Approve for me", hint: "With Internet Access on, go online without asking", icon: ShieldCheckIcon },
-  { id: "full", label: "Full access", hint: "Currently the same as Approve for me: no prompts to go online", icon: ShieldAlertIcon, danger: true },
+/** What the agent asks first in each mode: going online (src/harness/agent.ts) and shell commands (needsApproval in src/harness/shell.ts). */
+export const APPROVALS: { id: Approval; label: string; hint: string; icon: typeof HandIcon; danger?: boolean }[] = [
+  { id: "ask", label: "Ask for approval", hint: "Asks before running a command or going online", icon: HandIcon },
+  { id: "auto", label: "Approve for me", hint: "Goes online and runs reads, tests and builds without asking. Asks before other commands.", icon: ShieldCheckIcon },
+  { id: "full", label: "Full access", hint: "Runs any command and goes online without asking", icon: ShieldAlertIcon, danger: true },
 ];
 
+/** This chat's approval mode, kept with the chat; Internet Access stays app-wide. */
 function PermissionsMenu() {
   const { settings, setSettings, threads, activeId, projects, openProjectSettings } = useStore();
-  const current = APPROVALS.find((a) => a.id === settings.approval) ?? APPROVALS[1];
+  const { approval, choose } = useSession();
+  const current = APPROVALS.find((a) => a.id === approval) ?? APPROVALS[0];
   const project = projects.find((p) => p.id === threads.find((t) => t.id === activeId)?.projectId);
   return (
     <DropdownMenu>
@@ -127,8 +129,8 @@ function PermissionsMenu() {
       />
       <DropdownMenuContent align="start" className="w-[27rem] p-1" side="top" sideOffset={POPUP_GAP}>
         <DropdownMenuRadioGroup
-          onValueChange={(v) => setSettings({ approval: v as Approval })}
-          value={settings.approval}
+          onValueChange={(v) => choose({ approval: v as Approval })}
+          value={approval}
         >
           {APPROVALS.map((a) => (
             <DropdownMenuRadioItem
@@ -149,8 +151,8 @@ function PermissionsMenu() {
           ))}
         </DropdownMenuRadioGroup>
         <p className="px-2 pt-1 pb-1.5 text-[12px] leading-4 text-muted-foreground">
-          In every mode, files stay within this project&apos;s folders at each folder&apos;s access level, and file
-          changes are not asked about.
+          In every mode, files change only in Read &amp; write folders, and edits aren&apos;t asked about. Going online
+          needs Internet Access. Plans and questions always wait for you.
         </p>
         <DropdownMenuSeparator className="my-1" />
         <DropdownMenuItem

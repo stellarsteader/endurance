@@ -10,7 +10,7 @@ import { useStore } from "../../lib/store";
 import { cn } from "../../lib/utils";
 import { HuggingFaceSettings } from "./huggingface-settings";
 import { clearInstallFocus, useInstallFocus } from "./downloads";
-import { connectionKey, decorateModel, preferencesFor, recordMeasurement, savePreferences } from "./preferences";
+import { connectionKey, decorateModel, preferencesFor, recordReportedMemory, savePreferences } from "./preferences";
 import { featureModels, readingModels, saveFeatureModels } from "./feature-models";
 import { ManagedServer } from "./managed-server";
 import { RuntimeTitle } from "./runtime-title";
@@ -19,7 +19,7 @@ import { usePreferenceRevision } from "./use-chat-models";
 import type { RuntimeModelDetails } from "./types";
 import { draftOf, invalidFields, SamplingFields, setsOf, type SamplingDraft } from "./sampling-fields";
 import { formatBytes } from "./download-progress";
-import { estimateMemory, type MemoryMeasurement } from "../../lib/memory-estimate";
+import { estimateMemory, type ReportedMemory } from "../../lib/memory-estimate";
 import { windowStore, type WindowStore } from "../../lib/context-window";
 import { switchesByTemplate, THINKING_SWITCH_CHOICES, type ThinkingSwitchChoice } from "../../lib/thinking-switch";
 import { ipcMessage } from "../../lib/desktop";
@@ -34,9 +34,9 @@ const CONTEXT_PRESETS = [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288
 const contextLabel = formatContext;
 
 /** An estimate reads as one: ≈ about, ≤ at most, ≥ at least. */
-function estimateLabel(details: RuntimeModelDetails, context: number | undefined, measurements?: MemoryMeasurement[]) {
+function estimateLabel(details: RuntimeModelDetails, context: number | undefined, reported?: ReportedMemory[]) {
   if (!context) return undefined;
-  const estimate = estimateMemory(details, context, measurements);
+  const estimate = estimateMemory(details, context, reported);
   if (!estimate) return undefined;
   const mark = estimate.bound === "upper" ? "≤" : estimate.bound === "lower" ? "≥" : "≈";
   return { bytes: estimate.bytes, text: `${mark} ${formatBytes(estimate.bytes)} at ${contextLabel(context)}` };
@@ -101,9 +101,9 @@ function ModelEditor({
       .then((value) => {
         if (cancelled) return;
         setDetails(value);
-        // What the loaded model really uses here makes later estimates for it follow this machine.
+        // What the runtime reports the loaded model uses here makes later estimates for it follow this machine.
         if (value.loaded && value.loadedContext && value.memory)
-          recordMeasurement(connection, modelId, { context: value.loadedContext, bytes: value.memory.total });
+          recordReportedMemory(connection, modelId, { context: value.loadedContext, bytes: value.memory.total });
         setContext(contextSetting(windowStore(runtime), value, preferencesFor(connection, modelId).contextLimit));
       })
       .catch(() => {
@@ -200,8 +200,8 @@ function ModelEditor({
     }
   };
   // What the chosen window would take, where that can be told, against this computer's memory.
-  const measurements = preferencesFor(connection, modelId).measurements;
-  const estimate = details && store !== "cap" ? estimateLabel(details, context, measurements) : undefined;
+  const reportedMemory = preferencesFor(connection, modelId).reportedMemory;
+  const estimate = details && store !== "cap" ? estimateLabel(details, context, reportedMemory) : undefined;
   const memory = details?.hostMemory;
   const overMemory = Boolean(estimate && memory && estimate.bytes > memory);
   const defaultLabel =

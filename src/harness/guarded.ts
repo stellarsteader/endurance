@@ -57,6 +57,15 @@ export class Silent extends Error {
 
 type FinishUsage = Extract<LLMEvent, { type: "finish" }>["usage"];
 
+/** What a call's usage alone does not say: how long it generated, and what its output held besides the reply. */
+export interface CallInfo {
+  /** From the first piece to the finish: the time the runtime spent writing, after it read the prompt. */
+  decodeMs?: number;
+  thought: boolean;
+  /** It called tools, whose arguments the runtime counts as output too. */
+  tools: boolean;
+}
+
 export interface GuardedOptions {
   input: ReturnType<typeof makeRequest>;
   layer: typeof import("./chat").layer;
@@ -66,7 +75,7 @@ export interface GuardedOptions {
   caps: Caps;
   /** Each piece as it arrives, thinking split from text. */
   onPart?: (part: Watched, text: string) => void;
-  onUsage?: (usage: FinishUsage) => void;
+  onUsage?: (usage: FinishUsage, call: CallInfo) => void;
   /** Turns a streamed tool call into an error, for calls that run no tools. */
   rejectToolCalls?: string;
   /** Overrides the waits, for tests. */
@@ -112,6 +121,8 @@ export async function guardedStream(options: GuardedOptions): Promise<GuardedRes
   let timer: ReturnType<typeof setTimeout> | undefined;
   // Tells the request slot when the first piece arrived (see limit.firstPiece).
   let firstPiece: (() => void) | undefined;
+  // When the runtime began writing: generation speed is counted from here, not from the request.
+  let writingSince: number | undefined;
   // Restarted on every piece the runtime sends; firing stops the call as silent.
   const arm = (first: boolean) => {
     clearTimeout(timer);
@@ -161,6 +172,8 @@ export async function guardedStream(options: GuardedOptions): Promise<GuardedRes
         if (stopped) return;
         arm(false);
         firstPiece?.();
+        // An empty first piece (a role-only chunk) can come before the prompt is read, so writing starts at the first text.
+        if (writingSince === undefined && (event.type === "reasoning-delta" || event.type === "text-delta" || event.type === "tool-input-delta") && event.text) writingSince = Date.now();
         if (event.type === "reasoning-delta") take("reasoning", event.text);
         if (event.type === "text-delta") for (const piece of split.feed(event.text)) take(piece.part, piece.text);
         // A tool call's arguments are output too: a written file counts toward the cap like text.
@@ -174,7 +187,7 @@ export async function guardedStream(options: GuardedOptions): Promise<GuardedRes
         if (event.type === "tool-call" && options.rejectToolCalls) throw new Error(options.rejectToolCalls);
         if (event.type === "tool-call") toolCalls.push({ id: event.id, name: event.name, input: event.input });
         if (event.type === "finish") {
-          options.onUsage?.(event.usage);
+          options.onUsage?.(event.usage, { ...(writingSince !== undefined ? { decodeMs: Date.now() - writingSince } : {}), thought: pieces.reasoning > 0, tools: toolCalls.length > 0 || raw.size > 0 });
           finishReason = event.reason === "unknown" ? "other" : event.reason;
         }
       })

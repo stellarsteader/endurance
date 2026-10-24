@@ -20,15 +20,15 @@
 import { createUIMessageStream, createUIMessageStreamResponse, type FinishReason, type UIMessageStreamWriter } from "ai";
 import { Message, ToolCallPart, type ContentPart, type LLMEvent } from "./vendor/llm/schema";
 import { request as makeRequest } from "./vendor/llm/llm";
-import { identity, imageNote, imageRejected, IMAGES_LEFT_OUT, layer, modelFor, requestText, thinkingOff, toMessages, validate, withoutNewImages, type ChatRequest } from "./chat";
+import { addSideUsage, identity, imageNote, imageRejected, IMAGES_LEFT_OUT, layer, modelFor, requestText, thinkingOff, toMessages, validate, withoutNewImages, type ChatRequest } from "./chat";
 import { thinkingRequest } from "./thinking";
 import { learnOutput, learnRatio, measure, modelProfile, recheckWindow, windowFromError, withLiveWindow } from "./profile/models";
 import { findSkill, readSkill, skillBudget, skillCatalog } from "./skills";
 import { AccessDenied, Workspace } from "./workspace-tools";
 import { needsApproval, runShell, shellAvailable, TIMEOUT_MS } from "./shell";
-import { compactHistory, summaryMessage } from "./compaction";
-import { budgetFor, calibrate, charsFor, LEAST_RESULT, clearResults, inputLimit, isCleared, isEstimatedPrompt, requestTokens, resultRoom, RESULT_PREFIX, wholePrompt, type Budget } from "./budget";
-import { guardedStream, type StreamedToolCall } from "./guarded";
+import { carryCounts, compactHistory, compactSteps, stateNote, summaryMessage, type State } from "./compaction";
+import { budgetFor, calibrate, charsFor, LEAST_RESULT, clearResults, countedTokens, inputLimit, isCleared, isEstimatedPrompt, measuredTokens, messageTokens, resultRoom, RESULT_PREFIX, wholePrompt, type Anchor, type Budget } from "./budget";
+import { guardedStream, type CallInfo, type StreamedToolCall } from "./guarded";
 import { outputPlan, withBody } from "./output";
 import { tuned } from "./sampling";
 import { Stopped } from "./loop-guard";
@@ -59,6 +59,10 @@ const MAX_TURNS = 20;
 const MAX_SUBAGENT_TURNS = 12;
 /** Calls in a row that failed or could not run before tools are put away and the model answers. */
 const FAILURES = 3;
+/** Summaries one answer may make after its first call (claude-code and Hermes stop after a few as well). */
+const MAX_COMPACTIONS = 3;
+/** A summary must bring the request under this share of its size before, or no further one is tried. */
+const SHRINK = 0.9;
 /** Skills one request may follow, whether named by the person or chosen by the agent. */
 const MAX_SKILLS = 3;
 /** Reasoning kept per trace row for display; the model's own conversation keeps all of it. */
@@ -70,15 +74,48 @@ const ANSWER_NOW = "Answer the user now from what you found so far. Do not call 
 
 type FinishUsage = Extract<LLMEvent, { type: "finish" }>["usage"];
 
-function addUsage(total: Usage, usage: FinishUsage | undefined) {
+/** Turns whose first answering call is counted already, so later calls do not move `first`. */
+const counted = new WeakSet<Usage>();
+
+function addUsage(total: Usage, usage: FinishUsage | undefined, call?: CallInfo) {
   if (!usage) return;
+  if (!counted.has(total)) {
+    counted.add(total);
+    if (usage.inputTokens !== undefined && !isEstimatedPrompt(usage)) total.first = usage.inputTokens;
+  }
+  const visible = Math.max(0, (usage.outputTokens ?? 0) - (usage.reasoningTokens ?? 0));
   total.input += usage.inputTokens ?? 0;
   total.reasoning += usage.reasoningTokens ?? 0;
-  total.output += Math.max(0, (usage.outputTokens ?? 0) - (usage.reasoningTokens ?? 0));
+  total.output += visible;
   total.cached += usage.cacheReadInputTokens ?? 0;
-  total.context = (usage.inputTokens ?? 0) + Math.max(0, (usage.outputTokens ?? 0) - (usage.reasoningTokens ?? 0));
+  total.context = (usage.inputTokens ?? 0) + visible;
+  // The latest call's reply count, only when neither thinking nor tool arguments are folded into it.
+  const exact = !!call && usage.outputTokens !== undefined && (usage.reasoningTokens !== undefined || !call.thought) && !call.tools;
+  total.reply = exact ? visible : undefined;
+  if (call?.decodeMs) total.decodeMs = (total.decodeMs ?? 0) + call.decodeMs;
   total.calls = (total.calls ?? 0) + 1;
   if (isEstimatedPrompt(usage)) total.estimated = true;
+}
+
+/**
+ * A call's count, kept for the next request: what the prompt grew by since the last call is put on the messages added
+ * in between (tool results), shared by their estimated size, and the call's prompt and output become the new anchor,
+ * which the message its output turns into completes.
+ */
+function settle(run: Run, usage: FinishUsage) {
+  const input = usage?.inputTokens;
+  if (input === undefined) return;
+  const anchor = run.anchor;
+  if (anchor && anchor.length <= run.history.length) {
+    const added = run.history.slice(anchor.length);
+    const grown = input - anchor.tokens;
+    const estimated = added.reduce((total, message) => total + messageTokens(message), 0);
+    if (added.length && grown > 0 && estimated > 0)
+      for (const message of added) measuredTokens.set(message, Math.round((grown * messageTokens(message)) / estimated));
+  }
+  const output = usage?.outputTokens ?? 0;
+  run.lastOutput = output;
+  run.anchor = { tokens: input + output, length: run.history.length + 1 };
 }
 
 /**
@@ -186,7 +223,19 @@ interface Run {
   ratio: number;
   /** Web access for this run: undefined until asked when approval is required. */
   web?: boolean;
-  compacted: boolean;
+  /** Compactions made since the run's first call (MAX_COMPACTIONS). */
+  compactions: number;
+  /** The conversation before this request was summarized already, so the next compaction goes to the run's steps. */
+  conversationCompacted: boolean;
+  /** The runtime refused the last request as too long for its window, so the next one is made smaller first. */
+  overflowed?: boolean;
+  /** The last call's count, which the next request's size starts from (budget.countedTokens); gone once the history before it changes. */
+  anchor?: Anchor;
+  /** The last call's output as counted, put on the message it becomes. */
+  lastOutput?: number;
+  /** The plan the user approved in this request, and the to-do list as it stands, for what a summary puts back. */
+  plan?: string;
+  todos?: { title: string; status: string }[];
   failures: number;
   turn: number;
   /** Tools are called natively, or by writing JSON. Decided once per run. */
@@ -268,8 +317,11 @@ interface Env {
   coordinator: boolean;
   maxTurns: number;
   view: View;
-  /** Summarizes the earlier conversation once; returns the messages that replace it. */
-  compact?: () => Promise<Message[] | undefined>;
+  /**
+   * Makes the request smaller with a summary, oldest first: the conversation before this request, once, then the
+   * run's earlier steps. Changes the run's history; false when there was nothing left to summarize.
+   */
+  compact?: (run: Run, budget: Budget) => Promise<boolean>;
   /** Runs delegate and use_skill, which need the coordinator's state. */
   special?: (call: StreamedToolCall, name: ToolName, args: Args, room: number) => Promise<Outcome>;
   /**
@@ -283,6 +335,30 @@ type LoopEnd = { kind: "answered"; text: string } | { kind: "paused" } | { kind:
 
 const signatureOf = (name: string, args: Args) => `${name}:${JSON.stringify(args)}`;
 const online = (name: ToolName, abilities: Abilities) => name === "web_search" || name === "fetch" || (name === "delegate" && abilities.web);
+
+/** A plan as text, for what a summary puts back. */
+const planText = (plan: ReturnType<typeof planOf>) =>
+  [plan.title, plan.summary, ...plan.steps.map((step, index) => `${index + 1}. ${step.title}${step.detail ? `: ${step.detail}` : ""}`)].filter(Boolean).join("\n");
+
+/** What earlier replies left that a summary puts back: the files they changed, the plan approved last, the latest to-do list. */
+function earlierState(messages: AppUIMessage[]): Pick<State, "changed" | "plan" | "todos"> {
+  const state: Pick<State, "changed" | "plan" | "todos"> = { changed: [] };
+  for (const message of messages)
+    for (const part of message.parts) {
+      if (part.type === "data-todos") state.todos = part.data.items;
+      if (part.type !== "dynamic-tool") continue;
+      const input = part.input && typeof part.input === "object" ? (part.input as Record<string, unknown>) : {};
+      if (part.toolName === "edit_file" && typeof input.path === "string") state.changed.push(input.path);
+      if (part.toolName === "plan_approval" && "approval" in part && part.approval?.approved) state.plan = planText(planOf(input as Args));
+    }
+  return state;
+}
+
+/** Reads a file's start through the workspace, as the read tool would, for what a summary puts back. */
+const readerOf = (workspace: Workspace): State["read"] => async (file, chars) => {
+  const text = await workspace.read(file, 1, chars);
+  return text.binary ? undefined : { content: text.content, truncated: text.truncated, lines: text.lines };
+};
 
 /**
  * What the model is told once the person answered its plan: carry it out (its steps become the to-do list when
@@ -446,25 +522,35 @@ function clearedResult(run: Run, id: string) {
 }
 
 /** Fits the next call into the window: clears old results, then compacts once. False when it still does not fit. */
-async function makeRoom(run: Run, env: Env, budget: Budget, extra: number) {
-  const fit = () => clearResults(run.system, run.history, run.from, budget, run.ratio, (id) => run.labels.get(id) ?? "A tool ran", extra);
-  let fitted = fit();
-  run.history = fitted.history;
-  if (fitted.cleared) {
-    run.cleared += fitted.cleared;
-    env.view.room?.(run.cleared);
-  }
-  if (!fitted.fits && !run.compacted && env.compact) {
-    run.compacted = true;
-    const conversation = await env.compact();
-    if (conversation) {
-      run.history = [...conversation, ...run.history.slice(run.from)];
-      run.from = conversation.length;
-      fitted = fit();
-      run.history = fitted.history;
+/**
+ * Fits the next request in the window, right before it is sent: old tool results of the run are cleared first,
+ * then summaries are made, a few at most per answer, each one required to shrink the request.
+ */
+async function makeRoom(run: Run, env: Env, budget: Budget, extra: number, added = 0) {
+  const size = () => countedTokens(run.system, run.history, run.ratio, extra, run.anchor, added);
+  const fit = () => {
+    const fitted = clearResults(run.system, run.history, run.from, budget, run.ratio, (id) => run.labels.get(id) ?? "A tool ran", extra, run.anchor, added);
+    run.history = fitted.history;
+    if (fitted.cleared) {
+      run.cleared += fitted.cleared;
+      run.anchor = undefined;
+      env.view.room?.(run.cleared);
     }
+    return fitted.fits;
+  };
+  // A request the runtime refused is made smaller even where the estimate says it fits: the estimate was low.
+  let fits = fit() && !(run.overflowed && env.compact);
+  run.overflowed = false;
+  while (!fits && env.compact && run.compactions < MAX_COMPACTIONS) {
+    run.compactions++;
+    const before = size();
+    if (!(await env.compact(run, budget))) break;
+    run.anchor = undefined;
+    fits = fit();
+    // A summary that barely shrank the request would only be followed by another like it.
+    if (!fits && size() > before * SHRINK) break;
   }
-  return fitted.fits;
+  return fits;
 }
 
 /** The loop: one call per turn until the model answers, the turns run out or the context is full. */
@@ -480,7 +566,7 @@ async function drive(run: Run, env: Env, pending: StreamedToolCall[] = []): Prom
     const final = run.turn >= env.maxTurns || run.failures >= FAILURES || !names.length;
     const thinks = !run.thinkingOff && !thinkingOff(body) && Boolean(body.reasoningSupported);
     const system = run.native || final ? run.system : `${run.system}\n\n${jsonGuide(names)}`;
-    const plan = await measure(body, system, run.history, thinks, final ? 0 : extra);
+    const plan = await measure(body, system, run.history, thinks, final ? 0 : extra, run.anchor);
     const fits = await makeRoom(run, env, plan.budget, final ? 0 : extra);
     const last = final || !fits;
     if (!fits) env.view.blocked?.("Context window full", "Answering with what was found so far");
@@ -523,14 +609,15 @@ const RESULT_SHARE = 1 / 4;
 
 /** Runs a turn's calls in order. False when an online call paused the run for approval. */
 async function runCalls(run: Run, env: Env, calls: StreamedToolCall[]) {
-  const { budget } = await measure(env.body, run.system, run.history);
+  const { budget } = await measure(env.body, run.system, run.history, true, 0, run.anchor);
   // Clearing older results for this turn's results beats shrinking each new one toward nothing.
   if (budget.window) {
     const need = Math.floor(inputLimit(budget) * RESULT_SHARE);
-    const fitted = clearResults(run.system, run.history, run.from, budget, run.ratio, (id) => run.labels.get(id) ?? "A tool ran", need);
+    const fitted = clearResults(run.system, run.history, run.from, budget, run.ratio, (id) => run.labels.get(id) ?? "A tool ran", 0, run.anchor, need);
     run.history = fitted.history;
     if (fitted.cleared) {
       run.cleared += fitted.cleared;
+      run.anchor = undefined;
       env.view.room?.(run.cleared);
     }
   }
@@ -559,7 +646,7 @@ async function runCalls(run: Run, env: Env, calls: StreamedToolCall[]) {
         return false;
     }
     // Each call of the turn gets an equal share of what the request leaves.
-    const used = requestTokens(run.system, run.history, run.ratio);
+    const used = countedTokens(run.system, run.history, run.ratio, 0, run.anchor);
     const room = Math.floor(resultRoom(budget, used) / (calls.length - index));
     const text = await runCall(run, env, call, room);
     run.history.push(
@@ -581,7 +668,8 @@ async function nativeTurn(
   extra: number
 ): Promise<{ kind: "calls"; calls: StreamedToolCall[]; text: string } | LoopEnd | "unsupported" | "retry"> {
   const { body } = env;
-  const plan = await measure(body, system, run.history, thinks, extra);
+  run.lastOutput = undefined;
+  const plan = await measure(body, system, run.history, thinks, extra, run.anchor);
   const output = outputPlan(body.runtime, plan.budget, plan.input, plan.cap, thinks);
   const sent = tuned(body, thinks, output);
   const input = makeRequest(
@@ -616,10 +704,11 @@ async function nativeTurn(
       signal: env.signal,
       caps: output.caps,
       maxTokens: output.maxTokens,
-      onUsage: (reported) => {
+      onUsage: (reported, call) => {
         // A count that left out the cached prompt is replaced by the estimate and teaches nothing (budget.wholePrompt).
         const { usage, trusted } = wholePrompt(reported, plan.estimated);
-        addUsage(run.usage, usage);
+        addUsage(run.usage, usage, call);
+        if (trusted) settle(run, usage);
         if (trusted) {
           learnRatio(body, plan.estimated, usage?.inputTokens);
           run.ratio = calibrate(run.ratio, plan.estimated, usage?.inputTokens);
@@ -676,7 +765,11 @@ async function nativeTurn(
         text += delta;
         show(text.length);
       },
-      onUsage: (usage) => addUsage(run.usage, usage),
+      // A continued answer's last call counts only the part it wrote, so the reply's own count is not known.
+      onUsage: (usage, call) => {
+        addUsage(run.usage, usage, call);
+        run.usage.reply = undefined;
+      },
       makeRoom: (answer) => roomToContinue(run, env, system, answer),
     });
     if (!end.stopped && !end.full) return { kind: "answered", text };
@@ -695,14 +788,16 @@ async function nativeTurn(
     ...(text ? [{ type: "text" as const, text }] : []),
     ...result.toolCalls.map((call) => ToolCallPart.make({ id: call.id, name: call.name, input: call.input })),
   ];
-  run.history.push(Message.assistant(content));
+  const step = Message.assistant(content);
+  if (run.lastOutput !== undefined) measuredTokens.set(step, run.lastOutput);
+  run.history.push(step);
   return { kind: "calls", calls: result.toolCalls, text };
 }
 
 /** Room to continue an answer of `answer` tokens: older results cleared, then the conversation summarized once. */
 async function roomToContinue(run: Run, env: Env, system: string, answer: number) {
-  const { budget } = await measure(env.body, system, run.history, false);
-  await makeRoom(run, env, budget, answer);
+  const { budget } = await measure(env.body, system, run.history, false, 0, run.anchor);
+  await makeRoom(run, env, budget, 0, answer);
   return run.history;
 }
 
@@ -714,6 +809,8 @@ async function refit(run: Run, env: Env, message: string) {
   const named = windowFromError(message);
   if (!named || run.refitted || env.signal.aborted) return false;
   run.refitted = true;
+  run.overflowed = true;
+  run.anchor = undefined;
   // The runtime is asked again, so the window has one source (see recheckWindow).
   const fit = await recheckWindow(env.body, named);
   run.usage.window = fit.window;
@@ -724,6 +821,7 @@ async function refit(run: Run, env: Env, message: string) {
 /** One turn for a model that writes its tool calls as JSON. Returns "answer" when it is ready to answer. */
 async function jsonTurn(run: Run, env: Env, system: string, names: readonly ToolName[]): Promise<"answer" | "paused" | "ran"> {
   const { body } = env;
+  run.lastOutput = undefined;
   const chosen = await thinkingCall({
     body,
     system,
@@ -732,7 +830,11 @@ async function jsonTurn(run: Run, env: Env, system: string, names: readonly Tool
     parse: (text) => parseJsonStep(text),
     signal: env.signal,
     onReasoning: env.view.reasoning,
-    addUsage: (usage) => addUsage(run.usage, usage as FinishUsage),
+    addUsage: (usage, call) => {
+      addUsage(run.usage, usage as FinishUsage, call);
+      // The JSON written back is the call, not the thinking before it, so the count over-states it a little.
+      if (usage && !isEstimatedPrompt(usage as FinishUsage)) settle(run, usage as FinishUsage);
+    },
   }).finally(() => env.view.thoughtDone());
   const step = chosen.value;
   if (!step || step.tool === "answer" || !names.includes(step.tool as ToolName)) {
@@ -740,7 +842,9 @@ async function jsonTurn(run: Run, env: Env, system: string, names: readonly Tool
     return step && step.tool !== "answer" && run.failures < FAILURES ? "ran" : "answer";
   }
   const call: StreamedToolCall = { id: `call-${crypto.randomUUID()}`, name: step.tool!, input: step.arguments ?? {} };
-  run.history.push(Message.assistant(JSON.stringify({ tool: call.name, arguments: call.input })));
+  const written = Message.assistant(JSON.stringify({ tool: call.name, arguments: call.input }));
+  if (run.lastOutput !== undefined) measuredTokens.set(written, run.lastOutput);
+  run.history.push(written);
   return (await runCalls(run, env, [call])) ? "ran" : "paused";
 }
 
@@ -758,7 +862,7 @@ async function answerAfterJson(run: Run, env: Env): Promise<LoopEnd> {
     messages: run.history,
     writer: env.writer,
     signal: env.signal,
-    onUsage: (usage) => addUsage(run.usage, usage),
+    onUsage: (usage, call) => addUsage(run.usage, usage, call),
     makeRoom: (answer) => roomToContinue(run, env, system, answer),
   });
   return { kind: "answered", text: "" };
@@ -829,7 +933,8 @@ async function runSubagent(parent: Run, env: Env, agent: SubagentData, context: 
     skills: [],
     documents: parent.documents,
     decisions: new Map(),
-    compacted: true,
+    compactions: 0,
+    conversationCompacted: true,
     failures: 0,
     turn: 0,
     native: parent.native,
@@ -879,6 +984,8 @@ async function runSubagent(parent: Run, env: Env, agent: SubagentData, context: 
   update(agent);
   for (const key of ["input", "output", "reasoning", "cached"] as const) parent.usage[key] += own[key];
   parent.usage.calls = (parent.usage.calls ?? 0) + (own.calls ?? 0);
+  // Its writing time joins the parent's with its tokens, so the turn's speed stays tokens over time.
+  if (own.decodeMs) parent.usage.decodeMs = (parent.usage.decodeMs ?? 0) + own.decodeMs;
   return { agent, written: run.written };
 }
 
@@ -994,6 +1101,7 @@ export async function agentResponse(request: Request) {
           const label = `Opened ${document.name.replace(/^The /, "the ")} as a document`;
           cot.steps.push({ id: `document-${document.id}`, kind: "read", label, doneLabel: label, status: "complete", note: `${document.pieces.length} pieces` });
         }
+        const ratio = (await modelProfile(body)).ratio;
         const compacted = await compactHistory({
           messages: readable,
           contextWindow: body.contextWindow,
@@ -1003,12 +1111,19 @@ export async function agentResponse(request: Request) {
           layer,
           signal: request.signal,
           writer,
-          thinking: await thinkingRequest(body, false),
+          thinking: await thinkingRequest(body, thinks),
+          thinks,
+          ratio,
           connection: body.connection,
-          tune: (maxTokens) => tuned(body, false, { maxTokens }),
+          tune: (maxTokens) => tuned(body, thinks, { maxTokens }),
+          onUsage: (reported, call) => addSideUsage(usage, reported, call),
         });
-        const summary = compacted.summary ? summaryMessage(compacted.summary) : undefined;
+        // A summary comes with the current state of what it covered, read now rather than remembered.
+        const earlier = earlierState(body.messages);
+        const restored = compacted.summary ? await stateNote({ ...earlier, read: readerOf(workspace), contextWindow: body.contextWindow, ratio }) : "";
+        const summary = compacted.summary ? summaryMessage([compacted.summary, restored].filter(Boolean).join("\n\n")) : undefined;
         const conversation = [...(summary ? [summary] : []), ...toMessages(compacted.rest, { vision: body.visionSupported })];
+        carryCounts(conversation, body.messages);
         run = {
           chatId,
           started,
@@ -1027,10 +1142,11 @@ export async function agentResponse(request: Request) {
           skills: named,
           documents,
           // What earlier requests taught about the runtime's token counts, so the first call already fits.
-          ratio: (await modelProfile(body)).ratio,
+          ratio,
           // Approve for me and Full access treat turning Internet Access on as consent.
           web: !abilities.web ? false : body.approval === "ask" && !alwaysOnline.has(chatId) ? undefined : true,
-          compacted: Boolean(compacted.data),
+          compactions: 0,
+          conversationCompacted: Boolean(compacted.data),
           failures: 0,
           turn: 0,
           native,
@@ -1140,31 +1256,76 @@ export async function agentResponse(request: Request) {
       const env: Env = {
         body,
         workspace,
-        writer,
+        // The to-do list as the model keeps it, for what a summary puts back.
+        writer: {
+          ...writer,
+          write: (part) => {
+            if (part.type === "data-todos") run.todos = part.data.items;
+            writer.write(part);
+          },
+        },
         signal: request.signal,
         abilities,
         coordinator: true,
         maxTurns: MAX_TURNS,
         view,
-        compact: async () => {
-          const result = await compactHistory({
-            messages: body.messages,
-            contextWindow: body.contextWindow,
-            system: estimateText(run.system),
+        compact: async (run, budget) => {
+          // A summary made for this answer counts in what the answer took; the window stays the answer's own.
+          const thinks = !run.thinkingOff && !thinkingOff(body) && Boolean(body.reasoningSupported);
+          const call = {
             model: modelFor(body),
             layer,
             signal: request.signal,
-            writer,
-            force: true,
-            thinking: await thinkingRequest(body, false),
+            thinking: await thinkingRequest(body, thinks, run.thinkingOff),
+            thinks,
+            ratio: run.ratio,
             connection: body.connection,
-          });
-          if (!result.data) return undefined;
-          return [summaryMessage(result.summary!), ...toMessages(result.rest, { vision: body.visionSupported })];
+            tune: (maxTokens?: number) => tuned(body, thinks, { maxTokens }),
+            onUsage: (reported: Parameters<typeof addSideUsage>[1], info: Parameters<typeof addSideUsage>[2]) => addSideUsage(run.usage, reported, info),
+          };
+          const earlier = earlierState(body.messages);
+          const state = () =>
+            stateNote({
+              changed: [...earlier.changed, ...run.written],
+              plan: run.plan ?? earlier.plan,
+              todos: run.todos ?? earlier.todos,
+              read: readerOf(workspace),
+              contextWindow: body.contextWindow,
+              ratio: run.ratio,
+            });
+          // The conversation before this request is the oldest part, so it goes first, once.
+          if (!run.conversationCompacted) {
+            run.conversationCompacted = true;
+            const result = await compactHistory({ ...call, messages: body.messages, contextWindow: body.contextWindow, system: estimateText(run.system), reserve: budget.reserve, writer, force: true });
+            if (result.data) {
+              const conversation = [summaryMessage([result.summary!, await state()].filter(Boolean).join("\n\n")), ...toMessages(result.rest, { vision: body.visionSupported })];
+              carryCounts(conversation, body.messages);
+              run.history = [...conversation, ...run.history.slice(run.from)];
+              run.from = conversation.length;
+              return true;
+            }
+          }
+          // Then the run's own steps, as Codex keeps only the user's messages.
+          const history = await compactSteps({ ...call, history: run.history, from: run.from, contextWindow: body.contextWindow, reserve: budget.reserve, written: run.written, state: await state() });
+          if (!history) return false;
+          run.history = history;
+          const label = "Summarized earlier steps to make room";
+          cot.steps.push({ id: `step-${cot.steps.length}`, kind: "think", label, doneLabel: label, status: "complete", startedAt: Date.now(), finishedAt: Date.now() });
+          publish();
+          return true;
         },
         special: async (call, name, args, room) => {
           if (name === "use_skill") return loadSkill(run, body, args.skill, room);
-          if (name === "propose_plan") return planOutcome(writer, run.decisions.get(call.id), args);
+          if (name === "propose_plan") {
+            const decision = run.decisions.get(call.id);
+            // An approved plan and its steps as the to-do list are what a later summary puts back.
+            if (decision?.approved) {
+              const plan = planOf(args);
+              run.plan = planText(plan);
+              if (plan.steps.length >= LEAST_TODOS) run.todos = plan.steps.map((step) => ({ title: step.title, status: "pending" }));
+            }
+            return planOutcome(writer, decision, args);
+          }
           if (name === "ask_user") return questionOutcome(run.decisions.get(call.id));
           const assignments = (args.assignments ?? []).filter((item) => item.task?.trim()).slice(0, MAX_SUBAGENTS);
           if (run.subagents.length >= MAX_SUBAGENTS) return { text: "Not run: the subagent limit for this request is reached.", failed: "Subagent limit reached" };

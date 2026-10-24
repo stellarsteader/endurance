@@ -3,7 +3,7 @@
 import { usePreferenceRevision } from "@/features/model-settings/use-chat-models";
 import { runtimeContext } from "@/features/model-settings/preferences";
 import type { WindowSource as RuntimeSource } from "@/lib/context-window";
-import { compactLine, getModel, MODELS, type ModelInfo } from "@/lib/models";
+import { compactLine, formatTokens, getModel, MODELS, type ModelInfo } from "@/lib/models";
 import { useStore } from "@/lib/store";
 import { applyStored, estimateTokens } from "@/lib/token-estimate";
 import type { AppUIMessage, ChatMeta, ContextSection, Usage } from "@/lib/types";
@@ -17,10 +17,8 @@ import { useSession } from "./session-context";
 type Tone = "calm" | "near" | "over";
 type WindowSource = RuntimeSource;
 
-const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
-const tokens = (n: number) => compact.format(Math.max(0, Math.round(n)));
+const tokens = formatTokens;
 const percent = (ratio: number) => `${ratio > 0 && ratio < 0.1 ? (ratio * 100).toFixed(1) : Math.round(ratio * 100)}%`;
-const money = (n: number) => `$${n > 0 && n < 0.01 ? n.toFixed(4) : n.toFixed(2)}`;
 
 /** Some servers send no usage at all, others send zeros; neither is a measurement. */
 const reported = (usage?: Usage): usage is Usage => !!usage && usage.input + usage.output + usage.reasoning > 0;
@@ -29,8 +27,6 @@ const reported = (usage?: Usage): usage is Usage => !!usage && usage.input + usa
  * agent turn can push past the window even though each call fit, so those count only for a single call.
  */
 const occupancy = (usage: Usage) => usage.context ?? (usage.calls === 1 ? usage.input + usage.output : undefined);
-/** Whether the reply's counts add up several model calls, or may (older replies did not record how many). */
-const totals = (usage: Usage) => (usage.calls ? usage.calls > 1 : usage.context === undefined);
 const estimate = (messages: AppUIMessage[]) => messages.reduce((total, message) => total + estimateTokens(message), 0);
 
 /** The parts of a prompt in the order they are sent, as the meter names them. */
@@ -63,14 +59,19 @@ interface Part {
 
 /**
  * The window's tokens split by part. The total is what the runtime counted; the split is the worker's estimate of
- * each part's share (ChatMeta.breakdown), applied to that total. Messages sent since count with the conversation.
+ * each part's share (ChatMeta.breakdown), applied to that total. Where the runtime counted the latest reply itself
+ * (Usage.reply), that part keeps its count and the others share the rest. Messages sent since count with the conversation.
  */
-function partsOf(breakdown: ChatMeta["breakdown"], total: number, since: number): Part[] {
+function partsOf(breakdown: ChatMeta["breakdown"], total: number, since: number, reply?: number): Part[] {
   const sum = PARTS.reduce((n, part) => n + (breakdown?.[part.key] ?? 0), 0);
   if (!breakdown || sum <= 0) return [];
+  const exact = reply !== undefined && (breakdown.reply ?? 0) > 0 && reply <= total;
+  const rest = exact ? sum - (breakdown.reply ?? 0) : sum;
+  const room = exact ? total - reply : total;
+  const share = (key: Part["key"]) => (exact && key === "reply" ? reply : rest > 0 ? ((breakdown[key] ?? 0) / rest) * room : 0);
   const parts = PARTS.filter((part) => (breakdown[part.key] ?? 0) > 0 || (part.key === "conversation" && since > 0)).map((part) => ({
     ...part,
-    tokens: ((breakdown[part.key] ?? 0) / sum) * total + (part.key === "conversation" ? since : 0),
+    tokens: share(part.key) + (part.key === "conversation" ? since : 0),
     shade: SHADES[0],
   }));
   // Largest first, in the bar and the rows alike, so each row sits where its colour does.
@@ -88,7 +89,6 @@ interface Measure {
   /** The latest measured reply recorded only turn totals, so `used` is estimated from message text instead. */
   totalsOnly: boolean;
   processed: number;
-  cost: number;
   summarized: number;
   /** What fills the window by part, when the latest measured reply carried its prompt's parts. */
   parts: Part[];
@@ -96,14 +96,19 @@ interface Measure {
 
 function measure(messages: AppUIMessage[]): Measure {
   let processed = 0;
-  let cost = 0;
   let summarized = 0;
   let replies = 0;
   let unreported = 0;
   let measuredAt = -1;
   let reply: Measure["reply"];
   messages.forEach((message, index) => {
-    for (const part of message.parts) if (part.type === "data-compaction") summarized = part.data.compacted;
+    for (const part of message.parts) {
+      if (part.type !== "data-compaction") continue;
+      summarized = part.data.compacted;
+      // A /compact's own calls; summaries made during a reply are in that reply's usage.
+      const took = part.data.usage;
+      if (took) processed += took.input + took.output + took.reasoning;
+    }
     if (message.role !== "assistant" || !message.metadata?.durationMs) return;
     replies++;
     const usage = message.metadata.usage;
@@ -114,8 +119,6 @@ function measure(messages: AppUIMessage[]): Measure {
     }
     measuredAt = index;
     processed += usage.input + usage.output + usage.reasoning;
-    const [inPrice, outPrice] = getModel(message.metadata.model).price;
-    cost += ((usage.input - usage.cached) * inPrice + usage.cached * inPrice * 0.1 + (usage.output + usage.reasoning) * outPrice) / 1_000_000;
   });
 
   const after = messages.slice(measuredAt + 1);
@@ -125,14 +128,14 @@ function measure(messages: AppUIMessage[]): Measure {
   const totalsOnly = reported(base) && occupied === undefined;
   if (occupied !== undefined) {
     const since = estimate(after);
-    const parts = partsOf(messages[measuredAt].metadata?.breakdown, occupied, since);
+    const parts = partsOf(messages[measuredAt].metadata?.breakdown, occupied, since, base?.reply);
     // The runtime's count may have left out its cached prompt; the harness then sent its estimate (harness/budget).
-    return { used: occupied + since, estimated: after.length > 0 || Boolean(base?.estimated), reply, replies, unreported, totalsOnly, processed, cost, summarized, parts };
+    return { used: occupied + since, estimated: after.length > 0 || Boolean(base?.estimated), reply, replies, unreported, totalsOnly, processed, summarized, parts };
   }
   // Nothing measured since the last summary: estimate what the harness would send, as it does itself.
   const stored = applyStored(messages);
   const used = estimate(stored.rest) + (stored.summary ? Math.ceil(stored.summary.length / 3) : 0);
-  return { used, estimated: messages.length > 0, reply, replies, unreported, totalsOnly, processed, cost, summarized, parts: [] };
+  return { used, estimated: messages.length > 0, reply, replies, unreported, totalsOnly, processed, summarized, parts: [] };
 }
 
 function resolveWindow(model: ModelInfo): { tokens: number; source?: WindowSource } {
@@ -266,7 +269,6 @@ export function ContextMeter() {
   const size = !known ? "—" : window.source === "max" ? `up to ${tokens(max)}` : `${guessed ? "~" : ""}${tokens(max)}`;
   const usage = m.reply?.usage;
   const otherModel = m.reply?.model && m.reply.model !== model.id ? getModel(m.reply.model).name : undefined;
-  const noPrice = model.price[0] === 0 && model.price[1] === 0;
   const openModels = () => setSettingsSection("models");
 
   // At most one notice: the one that most changes how to read the number.
@@ -327,7 +329,9 @@ export function ContextMeter() {
               <div className="mb-1.5 flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
                 <span className="flex items-center gap-1.5">
                   Context window
-                  {busy && <span aria-label="Updating" className="size-1.5 animate-pulse rounded-full bg-sky-500" role="status" />}
+                  {/* The parts below are the harness's estimate of the runtime's total, so the card says it once. */}
+                  {m.parts.length > 0 && <span className="ml-1">Est.</span>}
+                  {busy &&<span aria-label="Updating" className="size-1.5 animate-pulse rounded-full bg-sky-500" role="status" />}
                 </span>
                 {(!empty || known) && (
                   <span
@@ -384,7 +388,7 @@ export function ContextMeter() {
                         {part.label}
                       </span>
                     }
-                    value={`~${tokens(part.tokens)}`}
+                    value={tokens(part.tokens)}
                   />
                 ))}
                 {empty && <p className="pb-1 text-[11.5px] text-muted-foreground leading-[1.4]">Fills in after your first message.</p>}
@@ -393,33 +397,10 @@ export function ContextMeter() {
 
             {notice}
 
-            {m.reply && (
-              <Section
-                aside={usage && totals(usage) ? (usage.calls ? `Total of ${usage.calls} model calls` : "Total of all model calls") : undefined}
-                title="Last reply"
-              >
-                {usage ? (
-                  <>
-                    <Row label="Prompt" value={tokens(usage.input)} />
-                    {usage.cached > 0 && <Row hint={percent(usage.cached / Math.max(1, usage.input))} label="Reused from cache" value={tokens(usage.cached)} />}
-                    <Row label="Reply" value={tokens(usage.output)} />
-                    {usage.reasoning > 0 && <Row label="Thinking" value={tokens(usage.reasoning)} />}
-                  </>
-                ) : (
-                  <Row label="Token counts" muted value="Not reported" />
-                )}
-              </Section>
-            )}
-
             {m.replies > 0 && (
               <Section title="This chat">
                 {m.processed > 0 && <Row hint={m.unreported ? `${m.unreported} unreported` : undefined} label="Tokens processed" value={tokens(m.processed)} />}
                 {m.summarized > 0 && <Row label="Summarized" value={`${m.summarized} earlier ${m.summarized === 1 ? "message" : "messages"}`} />}
-                <Row
-                  label="Est. cost"
-                  muted={noPrice}
-                  value={noPrice ? (local ? "Free · runs locally" : "Not priced") : m.processed ? `${m.unreported ? "≥ " : ""}${money(m.cost)}` : "Unknown"}
-                />
               </Section>
             )}
 

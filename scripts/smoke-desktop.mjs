@@ -88,7 +88,7 @@ try {
   await page.evaluate(() => {
     // The store writes its first save shortly after launch; it may not be there yet.
     const saved = JSON.parse(localStorage.getItem("endurance:v1")) ?? {};
-    saved.settings = { model: "local:vllm:fixture-chat", effort: "high", approval: "auto", webSearch: false };
+    saved.settings = { model: "local:vllm:fixture-chat", effort: "high", defaultApproval: "auto", webSearch: false };
     localStorage.setItem("endurance:v1", JSON.stringify(saved));
   });
   await page.reload();

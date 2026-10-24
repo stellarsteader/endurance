@@ -206,6 +206,19 @@ html[data-reordering] [data-highlighted] { background-color: transparent !import
 html[data-reordering] [data-reorder-row]:not([data-current]):hover { background-color: transparent !important; }
 html[data-reordering] [data-row-actions] { opacity: 0 !important; pointer-events: none !important; }
 
+/* Chat text (DESIGN.md): the spacing of markdown in replies, thoughts, the library and summaries. It replaces the
+   library's spacing and heading sizes; blocks are 12px apart, a list after a paragraph 8px, list items 4px, and a
+   heading at the text's own size sits 24px below what comes before it and 4px above what follows. */
+.chat-text > * { margin-block: 0; }
+.chat-text > * + * { margin-top: 12px; }
+.chat-text > p + :is(ul, ol) { margin-top: 8px; }
+.chat-text > * + :is(h1, h2, h3, h4, h5, h6) { margin-top: 24px; }
+.chat-text > :is(h1, h2, h3, h4, h5, h6) + * { margin-top: 4px; }
+.chat-text :is(h1, h2, h3, h4, h5, h6) { font-size: inherit; line-height: inherit; font-weight: 500; }
+.chat-text li { padding-block: 0; }
+.chat-text li + li,
+.chat-text li > :is(ul, ol) { margin-top: 4px; }
+
 /* A code block in a reply is one box: the library's frame and language bar go (see markdown-blocks.tsx). */
 [data-streamdown="code-frame"] [data-streamdown="code-block"] { margin: 0; padding: 0; gap: 0; border: 0; background: transparent; }
 [data-streamdown="code-frame"] [data-streamdown="code-block-header"] { display: none; }

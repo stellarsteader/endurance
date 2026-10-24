@@ -12,7 +12,7 @@ import { request as makeRequest } from "./vendor/llm/llm";
 import { Message } from "./vendor/llm/schema";
 import { layer, modelFor, thinkingOff, type ChatRequest } from "./chat";
 import { endpoint } from "./runtime";
-import { guardedStream, type Caps } from "./guarded";
+import { guardedStream, type Caps, type CallInfo } from "./guarded";
 import { outputPlan, withBody } from "./output";
 import { tuned } from "./sampling";
 import { explainOverflow, learnOutput, learnRatio, measure } from "./profile/models";
@@ -52,7 +52,7 @@ interface Call {
   onReasoning?: (delta: string) => void;
   /** Called when the harness stops the call because it looped or ran past its cap. */
   onStopped?: (stopped: Stopped) => void;
-  addUsage: (usage: unknown) => void;
+  addUsage: (usage: unknown, call?: CallInfo) => void;
 }
 
 /**
@@ -94,11 +94,11 @@ async function guardedCall(call: Call) {
     signal: call.signal,
     caps: call.caps ?? output.caps,
     maxTokens: output.maxTokens,
-    onUsage: (reported) => {
+    onUsage: (reported, info) => {
       const { usage, trusted } = wholePrompt(reported, estimated);
       if (trusted) learnRatio(call.body, estimated, usage?.inputTokens);
       learnOutput(call.body, thinks, usage?.outputTokens);
-      call.addUsage(usage);
+      call.addUsage(usage, info);
     },
     onPart: (part, text) => {
       if (part === "reasoning") call.onReasoning?.(text);

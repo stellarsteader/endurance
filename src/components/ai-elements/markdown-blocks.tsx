@@ -70,7 +70,7 @@ function Table({ children, className, ...props }: ComponentProps<"table"> & { no
     }
   };
   return (
-    <div className="mt-4 mb-3" data-streamdown="table-wrapper">
+    <div data-streamdown="table-wrapper">
       <div className="overflow-x-auto rounded-[12px] border border-border bg-background">
         <table className={["w-full divide-y divide-border", className].filter(Boolean).join(" ")} data-streamdown="table" ref={table} {...attributes}>
           {children}
@@ -86,7 +86,7 @@ function Pre({ children, node }: { children?: ReactNode; node?: HastNode }) {
   const block = isValidElement(children) ? cloneElement(children as React.ReactElement<Record<string, unknown>>, { "data-block": "true" }) : children;
   const copy = () => navigator.clipboard.writeText(textOf(node).replace(/\n$/, ""));
   return (
-    <div className="mt-4 mb-3" data-streamdown="code-frame">
+    <div data-streamdown="code-frame">
       {block}
       <CopyBelow copy={copy} />
     </div>

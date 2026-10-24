@@ -12,8 +12,10 @@ export function chatModelId(chat: { choice?: ChatChoice; messages: readonly AppU
   return chat.choice?.model ?? replyModel(chat.messages) ?? chat.replyModel ?? latest;
 }
 
-/** The chat's choice after the person picks: another model drops an effort chosen for the previous one. */
+/** The chat's choice after the person picks: another model drops an effort chosen for the previous one, not the approval mode. */
 export function nextChoice(current: ChatChoice, patch: ChatChoice): ChatChoice {
-  if (patch.model && patch.model !== current.model) return { model: patch.model, ...(patch.effort ? { effort: patch.effort } : {}) };
+  const approval = patch.approval ?? current.approval;
+  if (patch.model && patch.model !== current.model)
+    return { model: patch.model, ...(patch.effort ? { effort: patch.effort } : {}), ...(approval ? { approval } : {}) };
   return { ...current, ...patch };
 }
