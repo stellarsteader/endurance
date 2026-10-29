@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1070" width="1200" height="1070" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#24262b"/>
+    </marker>
+    <style>
+      .band { fill: #f1f1f3; stroke: #2a2c31; stroke-width: 2; }
+      .group { fill: #ffffff; stroke: #2a2c31; stroke-width: 1.5; }
+      .container { fill: #fafafa; stroke: #2a2c31; stroke-width: 1.3; stroke-dasharray: 5 4; }
+      .box { stroke: #24262b; stroke-width: 2; }
+      .blue { fill: #c7dcf8; }
+      .purple { fill: #e1d5ee; }
+      .yellow { fill: #fde6a6; }
+      .green { fill: #cfe7cc; }
+      .band-title { font-size: 20px; font-weight: 700; fill: #1d1f23; }
+      .group-title { font-size: 16px; font-weight: 700; fill: #1d1f23; }
+      .title { font-size: 19px; font-weight: 700; fill: #1d1f23; text-anchor: middle; }
+      .sub { font-size: 15px; fill: #45484f; text-anchor: middle; }
+      .small { font-size: 13px; fill: #45484f; }
+      .label { font-size: 15px; fill: #3a3d44; }
+      .line { fill: none; stroke: #24262b; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <!-- Bands first, so arrows into them stay on top -->
+  <rect class="band" x="40" y="20" width="1120" height="150" rx="14"/>
+  <text class="band-title" x="64" y="54">App</text>
+  <rect class="band" x="40" y="232" width="1120" height="150" rx="14"/>
+  <text class="band-title" x="64" y="266">Main process</text>
+  <rect class="band" x="40" y="432" width="1120" height="356" rx="14"/>
+  <text class="band-title" x="64" y="466">Agent harness</text>
+  <rect class="band" x="40" y="830" width="1120" height="218" rx="14"/>
+  <text class="band-title" x="64" y="864">Model runtimes</text>
+
+  <!-- App -->
+  <rect class="box blue" x="70" y="72" width="300" height="70" rx="10"/>
+  <text class="title" x="220" y="102">Chat thread</text>
+  <text class="sub" x="220" y="126">Answers · tool steps · cards · diffs</text>
+  <rect class="box blue" x="410" y="72" width="290" height="70" rx="10"/>
+  <text class="title" x="555" y="102">Workspace panel</text>
+  <text class="sub" x="555" y="126">Agents · to-dos · changes · terminal</text>
+  <rect class="box blue" x="740" y="72" width="390" height="70" rx="10"/>
+  <text class="title" x="935" y="102">Composer</text>
+  <text class="sub" x="935" y="126">Attachments · file mentions · Plan first · approvals</text>
+  <path class="line" d="M370,107 H404" marker-end="url(#arrow)"/>
+
+  <!-- Composer to the chat bridge -->
+  <path class="line" d="M935,142 V200 H585 V276" marker-end="url(#arrow)"/>
+  <text class="label" x="612" y="222">Prompts and approvals</text>
+
+  <!-- Main process -->
+  <rect class="box purple" x="70" y="282" width="280" height="70" rx="10"/>
+  <text class="title" x="210" y="312">Encrypted storage</text>
+  <text class="sub" x="210" y="336">History · attachments · file copies</text>
+  <rect class="box blue" x="410" y="282" width="350" height="70" rx="10"/>
+  <text class="title" x="585" y="312">Chat bridge</text>
+  <text class="sub" x="585" y="336">Runtime lookup · folders · image prep</text>
+  <rect class="box blue" x="820" y="282" width="310" height="70" rx="10"/>
+  <text class="title" x="975" y="312">Connections</text>
+  <text class="sub" x="975" y="336">Your servers · encrypted API keys</text>
+  <path class="line" d="M410,317 H356" marker-end="url(#arrow)"/>
+  <path class="line" d="M820,317 H766" marker-end="url(#arrow)"/>
+
+  <!-- Agent harness -->
+  <path class="line" d="M585,352 V486" marker-end="url(#arrow)"/>
+  <rect class="box blue" x="410" y="492" width="330" height="70" rx="10"/>
+  <text class="title" x="575" y="522">Agent loop</text>
+  <text class="sub" x="575" y="546">Plans · to-dos · questions · subagents</text>
+  <rect class="box blue" x="70" y="492" width="280" height="70" rx="10"/>
+  <text class="title" x="210" y="522">Context budget</text>
+  <text class="sub" x="210" y="546">Window share · clearing · compaction</text>
+  <rect class="box blue" x="800" y="492" width="330" height="70" rx="10"/>
+  <text class="title" x="965" y="522">Runtime adapters</text>
+  <text class="sub" x="965" y="546">Ollama native · OpenAI-compatible</text>
+  <rect class="box yellow" x="410" y="602" width="280" height="70" rx="10"/>
+  <text class="title" x="550" y="632">Tools + permissions</text>
+  <text class="sub" x="550" y="656">Folder access · sandbox · web</text>
+  <rect class="box green" x="70" y="702" width="670" height="60" rx="10"/>
+  <text class="title" x="405" y="728">Streamed events → thread</text>
+  <text class="sub" x="405" y="750">Text · reasoning · tool steps · cards · usage</text>
+  <path class="line" d="M410,527 H356" marker-end="url(#arrow)"/>
+  <path class="line" d="M740,527 H794" marker-end="url(#arrow)"/>
+  <path class="line" d="M550,562 V596" marker-end="url(#arrow)"/>
+  <path class="line" d="M718,562 V696" marker-end="url(#arrow)"/>
+  <text class="label" x="730" y="642">Streamed updates</text>
+
+  <!-- Streamed events back to the chat thread -->
+  <path class="line" d="M70,732 H24 V210 H220 V148" marker-end="url(#arrow)"/>
+
+  <!-- Runtime adapters to the model runtimes -->
+  <path class="line" d="M965,562 V874" marker-end="url(#arrow)"/>
+  <path class="line" d="M965,812 H320 V874" marker-end="url(#arrow)"/>
+
+  <!-- Model runtimes -->
+
+  <rect class="group" x="70" y="880" width="500" height="146" rx="12"/>
+  <text class="group-title" x="88" y="906">This computer</text>
+  <rect class="box yellow" x="90" y="926" width="140" height="70" rx="10"/>
+  <text class="title" x="160" y="967">Ollama</text>
+  <rect class="box yellow" x="245" y="926" width="140" height="70" rx="10"/>
+  <text class="title" x="315" y="967">LM Studio</text>
+  <rect class="box yellow" x="400" y="926" width="150" height="70" rx="10"/>
+  <text class="title" x="475" y="967">llama.cpp</text>
+
+  <rect class="group" x="620" y="880" width="510" height="146" rx="12"/>
+  <text class="group-title" x="638" y="906">Your GPU server</text>
+  <rect class="box blue" x="640" y="926" width="160" height="70" rx="10"/>
+  <text class="title" x="720" y="956">Manager</text>
+  <text class="sub" x="720" y="980">One address</text>
+  <rect class="container" x="830" y="916" width="135" height="94" rx="8"/>
+  <text class="small" x="842" y="934">Container</text>
+  <rect class="box yellow" x="842" y="944" width="111" height="52" rx="8"/>
+  <text class="title" x="897.5" y="977">Runtime</text>
+  <rect class="container" x="980" y="916" width="135" height="94" rx="8"/>
+  <text class="small" x="992" y="934">Container</text>
+  <rect class="box yellow" x="992" y="944" width="111" height="52" rx="8"/>
+  <text class="title" x="1047.5" y="977">Runtime</text>
+  <path class="line" d="M800,961 H824" marker-end="url(#arrow)"/>
+</svg>
