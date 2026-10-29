@@ -29,6 +29,7 @@ import { budgetFor, charsFor, measuredTokens, RESULT_PREFIX, tokensOf } from "./
 import { withBody } from "./output";
 import type { Tuned } from "./sampling";
 import type { ThinkingRequest } from "./thinking";
+import { appNote } from "./app-note";
 
 export { applyStored, estimateTokens };
 
@@ -41,8 +42,25 @@ const UNKNOWN_WINDOW = 4096;
 
 type FinishUsage = Extract<LLMEvent, { type: "finish" }>["usage"];
 
-export function summaryMessage(summary: string) {
-  return Message.user(`Summary of the earlier conversation, which is no longer shown in full:\n${summary}`);
+/**
+ * The summary as the message before the newest one, marked where it starts and ends. Framed as background: a model
+ * that takes the summary's open items for the request resumes old work instead of answering, and one that reads it as
+ * a closed transcript may stop calling tools (Hermes Agent saw both). The end mark matters because the summary and the
+ * newest message often go as one message (a chat template takes no two user messages in a row), and without it the
+ * earlier requests the summary keeps read as part of the new one.
+ */
+export function summaryMessage(summary: string, tools = false) {
+  return Message.user(
+    appNote(
+      [
+        `Summary of the earlier conversation, which is no longer shown in full. It is background, not a new request.${tools ? " Your tools work as before." : ""}`,
+        "",
+        summary,
+        "",
+        "End of the summary. The user's new message comes after this note: reply to it, and take up work the summary lists only when that message asks for it.",
+      ].join("\n")
+    )
+  );
 }
 
 /** The runtime's counts of the conversation's messages put on the messages sent for them, by ID. */
@@ -71,6 +89,8 @@ interface SummaryCall {
   ratio?: number;
   /** Each summary call's usage, for the reply it was made for. */
   onUsage?: (usage: FinishUsage, call: CallInfo) => void;
+  /** What the person asked the summary to keep, as `/compact <what to keep>` says it. */
+  focus?: string;
 }
 
 interface Options extends SummaryCall {
@@ -89,19 +109,25 @@ interface Options extends SummaryCall {
 /** Why a history was left as it was: too little to summarize, small enough, or the summary was unusable. */
 export type CompactSkip = "short" | "fits" | "failed";
 
-const PROMPT = (words: number) =>
+const PROMPT = (words: number, focus?: string) =>
   [
     "Summarize this conversation so it can continue without the original messages.",
-    "Use these headings, leaving out any with nothing under it: Goal and requests, Decisions, Files and what changed, Commands and results, Findings, Still to do.",
+    // Requests marked done or open: listed bare, a request already carried out read to the next reply as the task at hand.
+    "Use these headings, leaving out any with nothing under it: Requests (each marked done or open), Decisions, Files and what changed, Commands and results, Findings, Still to do.",
     "Keep names, numbers, file paths and the user's preferences exactly as written.",
     "When an earlier summary is given, keep its points unless the conversation changed them.",
     `Write in the conversation's language, in short bullet points, at most about ${words} words.`,
-  ].join(" ");
+    focus?.trim() ? `The user asked this summary to keep in particular: ${focus.trim().slice(0, 600)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
 // ------------------------------------------------------------------ the ledger
 
 /** Where the app's own record starts in a stored summary; the model's summary is what comes before it. */
 const LEDGER = "\n\n[Kept by the app as written, not summarized]";
+/** Heads the user's earlier messages; "The user wrote:" in summaries stored before it, still read back. */
+const SAID = "The user's earlier messages, as written (each was answered at the time):";
 
 interface Ledger {
   said: string[];
@@ -110,10 +136,11 @@ interface Ledger {
 
 function ledgerText(ledger: Ledger) {
   const sections = [
-    ledger.said.length ? `The user wrote:\n${ledger.said.map((line) => `- ${line.replace(/\n/g, "\n  ")}`).join("\n")}` : "",
+    ledger.said.length ? `${SAID}\n${ledger.said.map((line) => `- ${line.replace(/\n/g, "\n  ")}`).join("\n")}` : "",
     ledger.changed.length ? `Files changed:\n${ledger.changed.map((line) => `- ${line}`).join("\n")}` : "",
   ].filter(Boolean);
-  return sections.length ? `${LEDGER}\n${sections.join("\n")}` : "";
+  // A blank line between the lists, or markdown reads the next heading as part of the last item.
+  return sections.length ? `${LEDGER}\n${sections.join("\n\n")}` : "";
 }
 
 /** A stored summary split back into the model's part and the app's ledger, which is carried on by the app, not the model. */
@@ -124,7 +151,7 @@ function splitSummary(text: string | undefined): { prose: string; ledger: Ledger
   if (at < 0) return { prose: text, ledger };
   let section: keyof Ledger | undefined;
   for (const line of text.slice(at + LEDGER.length).split("\n")) {
-    if (line === "The user wrote:") section = "said";
+    if (line === SAID || line === "The user wrote:") section = "said";
     else if (line === "Files changed:") section = "changed";
     else if (section && line.startsWith("- ")) ledger[section].push(line.slice(2));
     else if (section === "said" && line.startsWith("  ") && ledger.said.length) ledger.said[ledger.said.length - 1] += `\n${line.slice(2)}`;
@@ -199,7 +226,7 @@ async function summarize(items: Item[], previous: string, contextWindow: number 
   const queue = [...items];
   let summary = previous;
   while (queue.length) {
-    const head = (text: string) => `${PROMPT(words)}\n\n${text ? `Earlier summary:\n${text}\n\n` : ""}Conversation:\n`;
+    const head = (text: string) => `${PROMPT(words, call.focus)}\n\n${text ? `Earlier summary:\n${text}\n\n` : ""}Conversation:\n`;
     const free = window - room - Math.ceil(estimateText(head(summary)) * ratio);
     if (free <= 0) return undefined;
     if (queue[0].tokens > free) queue.splice(0, 1, ...splitItem(queue[0], free));
@@ -218,7 +245,7 @@ async function summarize(items: Item[], previous: string, contextWindow: number 
             withBody(
               {
                 model: call.model,
-                system: PROMPT(words),
+                system: PROMPT(words, call.focus),
                 messages: [Message.user([summary ? `Earlier summary:\n${summary}` : "", `Conversation:\n${piece.map((item) => item.text).join("\n\n")}`].filter(Boolean).join("\n\n"))],
                 ...call.thinking,
                 ...(sent.generation ? { generation: sent.generation } : {}),
@@ -320,7 +347,8 @@ export async function compactHistory({ messages, contextWindow, system, reserve 
 // ------------------------------------------------------------------ a task's own steps
 
 /** How a summary of a task's steps starts, in the request's last user message, so a later one can find and replace it. */
-const STEPS_NOTE = "[Note from the app: your earlier steps in this task were summarized to make room in the context window.";
+const STEPS_NOTE = "<app-note>\nYour earlier steps in this task were summarized to make room in the context window.";
+const STEPS_END = "\n</app-note>";
 
 const partText = (part: ContentPart) => {
   if (part.type === "text") return part.text;
@@ -354,7 +382,7 @@ function stepsNoteOf(message: Message | undefined) {
   const index = message.content.findIndex((part) => part.type === "text" && part.text.startsWith(STEPS_NOTE));
   if (index < 0) return undefined;
   const part = message.content[index];
-  const text = part.type === "text" ? part.text.slice(STEPS_NOTE.length).replace(/^ Summary:\n/, "").replace(/\]$/, "") : "";
+  const text = part.type === "text" ? part.text.slice(STEPS_NOTE.length).replace(/^ Summary:\n/, "").replace(STEPS_END, "") : "";
   return { text, without: Message.make({ ...message, content: message.content.filter((_, at) => at !== index) }) };
 }
 
@@ -391,7 +419,7 @@ export async function compactSteps({ history, from, contextWindow, reserve, writ
   if (!prose) return undefined;
   const said = [...earlier.ledger.said, ...answersIn(steps)].map((text) => ({ text, tokens: Math.ceil(estimateText(text) * ratio) }));
   const ledger: Ledger = { said: keepSaid(said, contextWindow ?? UNKNOWN_WINDOW), changed: [...new Set([...earlier.ledger.changed, ...written])] };
-  const note = `${STEPS_NOTE} Summary:\n${prose}${ledgerText(ledger)}${state ? `\n\n${state}` : ""}]`;
+  const note = `${STEPS_NOTE} Summary:\n${prose}${ledgerText(ledger)}${state ? `\n\n${state}` : ""}${STEPS_END}`;
   const last = carried?.without ?? prefix.at(-1);
   // Riding on the last user message keeps the roles in turn, as chat templates expect.
   return last?.role === "user" ? [...prefix.slice(0, -1), Message.make({ ...last, content: [...last.content, Message.text(note)] })] : [...prefix, Message.user(note)];
@@ -433,5 +461,5 @@ export async function stateNote({ changed, read, plan, todos, contextWindow, rat
     todos?.length ? `The to-do list:\n${todos.map((todo) => `- [${todo.status === "completed" ? "x" : todo.status === "in_progress" ? "~" : " "}] ${todo.title}`).join("\n")}` : "",
     shown.length ? `Recently changed files as they are now:\n\n${shown.join("\n\n")}` : "",
   ].filter(Boolean);
-  return sections.length ? `[Put back by the app after the summary]\n${sections.join("\n\n")}` : "";
+  return sections.length ? `The current state, put back by the app after the summary:\n${sections.join("\n\n")}` : "";
 }

@@ -8,10 +8,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { hasPendingApproval, messageText } from "@/lib/derive";
 import { approvalExpired, declineApprovals, settleResumed, skippedNote, unansweredApprovals } from "@/lib/interrupted";
 import { resolveEffort, thinkingControl } from "@/lib/thinking-switch";
-import { currentSettings, currentWorkspace, useStore, type Thread, type WorkspaceTab } from "@/lib/store";
+import { currentSettings, currentWorkspace, useStore, type Project, type Thread, type WorkspaceTab } from "@/lib/store";
 import { showChat } from "@/lib/visible-chats";
 import type { AppUIMessage, Approval, ChatChoice, Effort } from "@/lib/types";
 import { chatModelId, nextChoice } from "@/lib/chat-choice";
+import { allowedBy, answeredNow, chatRules, withRules } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { chatFetch, ipcMessage } from "@/lib/desktop";
 import { getModel, MODELS, type ModelInfo } from "@/lib/models";
@@ -48,6 +49,7 @@ interface ChatRun {
   model: string;
   effort: Effort;
   approval: Approval;
+  planFirst: boolean;
 }
 /** Each open chat's run as of its last render, read by its transport at send time. */
 const chatRuns = new Map<string, ChatRun>();
@@ -90,6 +92,23 @@ function currentRuntime(run: ChatRun, project?: { id: string; name: string }) {
     // The main process replaces this ID with the folder access it saved for the project.
     ...(project ? { projectId: project.id, projectName: project.name } : {}),
   };
+}
+
+/**
+ * What a request says runs without asking (lib/permissions). In a project, the project's rules: Always allow answered
+ * on the cards this request carries joins them, and is saved for the project's other chats too. A chat in no project
+ * keeps to its own Always allow answers.
+ */
+function allowedFor(messages: AppUIMessage[], id: string, project: Project | undefined, save: (id: string, patch: (project: Project) => Partial<Project>) => Promise<void>) {
+  if (!project) return allowedBy(chatRules(messages, id));
+  const rules = project.alwaysAllowed ?? [];
+  const added = answeredNow(messages, id);
+  const next = withRules(rules, added);
+  if (next.length > rules.length)
+    save(project.id, (current) => ({ alwaysAllowed: withRules(current.alwaysAllowed ?? [], added) })).catch((error: unknown) =>
+      toast.error("Couldn't save the Always allow rule", { description: `It holds for this reply only. ${error instanceof Error ? ipcMessage(error) : ""}`.trim() })
+    );
+  return allowedBy(next);
 }
 
 /** A chat's name from its first message, until the person or the model names it. */
@@ -140,7 +159,7 @@ function useSessionCore({
   openAgent,
   openSideChat,
 }: CoreOptions) {
-  const { updateThread, setStatus, projects, settings, setSettings, chooseForChat, refreshModels, general } = useStore();
+  const { updateThread, setStatus, projects, settings, setSettings, chooseForChat, refreshModels, general, updateProject } = useStore();
   // Read when a reply ends; the chat's callbacks are made once, so they look here for the current values.
   const latestRef = useRef({ title: thread.title, temporary: thread.temporary, active, general, updateThread });
   useEffect(() => {
@@ -157,8 +176,10 @@ function useSessionCore({
         fetch: chatFetch,
         // Read at send time: the chat may have been moved into or out of a project since this was created.
         prepareSendMessagesRequest: ({ messages, id, body }) => {
-          const run = chatRuns.get(id) ?? { model: currentSettings.value?.model ?? "", effort: "high", approval: currentSettings.value?.defaultApproval ?? "ask" };
-          return { body: { ...currentSettings.value, ...extraBody, ...body, id, messages, ...run, ...currentRuntime(run, ephemeral ? undefined : projectOf(id)) } };
+          const run = chatRuns.get(id) ?? { model: currentSettings.value?.model ?? "", effort: "high", approval: currentSettings.value?.defaultApproval ?? "ask", planFirst: false };
+          const project = ephemeral ? undefined : projectOf(id);
+          const allowed = allowedFor(messages, id, project, updateProject);
+          return { body: { ...currentSettings.value, ...extraBody, ...body, id, messages, allowed, ...run, ...currentRuntime(run, project) } };
         },
       })
   );
@@ -240,9 +261,10 @@ function useSessionCore({
   const effort = resolveEffort(thinkingControl(model), choice?.effort ?? defaultEffort(model));
   // The chat's own approval mode; until its first message goes out, the default for new chats.
   const approval = choice?.approval ?? settings.defaultApproval;
+  const planFirst = choice?.planFirst === true;
   useEffect(() => {
-    chatRuns.set(thread.id, { model: model.id, effort, approval });
-  }, [thread.id, model.id, effort, approval]);
+    chatRuns.set(thread.id, { model: model.id, effort, approval, planFirst });
+  }, [thread.id, model.id, effort, approval, planFirst]);
   useEffect(() => () => void chatRuns.delete(thread.id), [thread.id]);
   const choose = useCallback(
     (patch: ChatChoice) => {
@@ -256,9 +278,10 @@ function useSessionCore({
   /**
    * /compact. A runtime model summarizes everything before the latest turn in the chat worker; the summary is
    * stored on the conversation like an automatic one, so later requests send it instead of those messages.
+   * `keep` is what the person wrote after /compact for the summary to keep, sent to the harness as `focus`.
    */
   const compacting = useRef(false);
-  const compact = useCallback(async () => {
+  const compact = useCallback(async (keep?: string) => {
     if (!model.runtime) return void toast("Choose a model first.");
     const desktop = window.endurance;
     if (!desktop) return void toast.error("Compaction needs the desktop app.");
@@ -269,7 +292,7 @@ function useSessionCore({
     const id = toast.loading("Compacting conversation…");
     try {
       const result = await desktop.compactChat(
-        JSON.stringify({ model: model.id, id: thread.id, messages, ...currentRuntime({ model: model.id, effort, approval }, project) })
+        JSON.stringify({ model: model.id, id: thread.id, messages, ...currentRuntime({ model: model.id, effort, approval, planFirst }, project), ...(keep?.trim() ? { focus: keep.trim() } : {}) })
       );
       if ("skipped" in result) {
         toast(result.skipped === "short" ? "Nothing to compact yet" : "Couldn't compact", {
@@ -304,7 +327,7 @@ function useSessionCore({
     } finally {
       compacting.current = false;
     }
-  }, [busy, pendingApproval, chat, thread.id, project, model.runtime, model.id, effort, approval]);
+  }, [busy, pendingApproval, chat, thread.id, project, model.runtime, model.id, effort, approval, planFirst]);
   const [queue, setQueue] = useState<QueuedMessage[]>([]);
 
   const send = useCallback<SessionValue["send"]>(
@@ -412,9 +435,10 @@ function useSessionCore({
       model,
       effort,
       approval,
+      planFirst,
       choose,
     }),
-    [thread, chat, busy, pendingApproval, queue, enqueue, removeQueued, sendNow, moveQueued, send, workspaceTab, openWorkspace, focus, agentId, openAgent, openSideChat, ephemeral, active, waitStatus, model, effort, approval, choose]
+    [thread, chat, busy, pendingApproval, queue, enqueue, removeQueued, sendNow, moveQueued, send, workspaceTab, openWorkspace, focus, agentId, openAgent, openSideChat, ephemeral, active, waitStatus, model, effort, approval, planFirst, choose]
   );
 
   return { value, runtime, compact };
@@ -472,6 +496,7 @@ function SideChat({
       model: chatModelId(parent, settings.model),
       ...(parent.choice?.effort ? { effort: parent.choice.effort } : {}),
       approval: parent.choice?.approval ?? settings.defaultApproval,
+      ...(parent.choice?.planFirst ? { planFirst: true } : {}),
     },
   }));
   const core = useSessionCore({

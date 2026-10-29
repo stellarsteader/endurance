@@ -15,7 +15,9 @@ export function chatModelId(chat: { choice?: ChatChoice; messages: readonly AppU
 /** The chat's choice after the person picks: another model drops an effort chosen for the previous one, not the approval mode. */
 export function nextChoice(current: ChatChoice, patch: ChatChoice): ChatChoice {
   const approval = patch.approval ?? current.approval;
+  const planFirst = patch.planFirst ?? current.planFirst;
+  // A new model drops the effort chosen for the old one; how the chat works with tools stays.
   if (patch.model && patch.model !== current.model)
-    return { model: patch.model, ...(patch.effort ? { effort: patch.effort } : {}), ...(approval ? { approval } : {}) };
+    return { model: patch.model, ...(patch.effort ? { effort: patch.effort } : {}), ...(approval ? { approval } : {}), ...(planFirst ? { planFirst } : {}) };
   return { ...current, ...patch };
 }

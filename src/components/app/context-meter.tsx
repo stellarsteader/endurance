@@ -2,8 +2,8 @@
 
 import { usePreferenceRevision } from "@/features/model-settings/use-chat-models";
 import { runtimeContext } from "@/features/model-settings/preferences";
-import type { WindowSource as RuntimeSource } from "@/lib/context-window";
-import { compactLine, formatTokens, getModel, MODELS, type ModelInfo } from "@/lib/models";
+import { windowStore, type WindowSource as RuntimeSource } from "@/lib/context-window";
+import { compactLine, formatContext, formatTokens, getModel, MODELS, type ModelInfo } from "@/lib/models";
 import { useStore } from "@/lib/store";
 import { applyStored, estimateTokens } from "@/lib/token-estimate";
 import type { AppUIMessage, ChatMeta, ContextSection, Usage } from "@/lib/types";
@@ -42,7 +42,6 @@ const PARTS: { key: ContextSection; label: string }[] = [
   { key: "toolResults", label: "Tool calls and results" },
   { key: "reply", label: "Latest reply" },
 ];
-/** One shade per part, darkest first, from the foreground token so both themes follow. */
 /**
  * One shade per part from the foreground token, so both themes follow. Parts go largest first, left to right, the
  * largest in the brightest shade. The softest is still far above the empty
@@ -138,11 +137,11 @@ function measure(messages: AppUIMessage[]): Measure {
   return { used, estimated: messages.length > 0, reply, replies, unreported, totalsOnly, processed, summarized, parts: [] };
 }
 
-function resolveWindow(model: ModelInfo): { tokens: number; source?: WindowSource } {
+function resolveWindow(model: ModelInfo): { tokens: number; source?: WindowSource; ceiling?: number } {
   if (!model.runtime) return { tokens: 0 };
   const raw = MODELS.find((item) => item.id === model.id) ?? model;
   const { tokens = 0, source } = runtimeContext(raw);
-  return { tokens, source };
+  return { tokens, source, ceiling: raw.maxContext };
 }
 
 function Ring({ ratio, tone, unknown }: { ratio: number; tone: Tone; unknown: boolean }) {
@@ -256,27 +255,43 @@ export function ContextMeter() {
   // passing it does.
   const gauged = known && (window.source !== "max" || m.used > max);
   const ratio = known ? m.used / max : 0;
+  const usage = m.reply?.usage;
   // The bar and the parts' shares are of the whole window; past it, or with no window gauged, of what is in use.
   const scale = Math.max(1, gauged ? Math.max(max, m.used) : m.used);
-  // The harness summarizes older turns once a request passes the trigger, so that is the line that matters.
-  const trigger = compactLine(model.capabilities.includes("reasoning") && effort !== "none");
+  // The harness summarizes older turns once a request passes the window less the output it keeps free, so that is
+  // the line that matters. The latest reply on this window says where the next request puts it; before one has,
+  // the share the harness starts with.
+  const reserve = m.reply?.model === model.id && usage?.window === max ? usage.reserve : undefined;
+  const trigger = known && reserve ? 1 - reserve / max : compactLine(model.capabilities.includes("reasoning") && effort !== "none");
   const line = local ? trigger : 0.9;
   const tone: Tone = !gauged ? "calm" : ratio > 1 ? "over" : ratio >= line ? "near" : "calm";
+  // The model takes more than the window it runs with, and a context length set in Models settings can raise it:
+  // Ollama stores it with the model and LM Studio loads at it. A server with a fixed window cannot be raised from here.
+  const ceiling = listed.ceiling ?? 0;
+  const roomy = known && !!model.runtime && windowStore(model.runtime) !== "cap" && window.source !== "max" && ceiling > max;
   const empty = chat.messages.length === 0;
   // Ollama's default seen on another model is near certain until this one loads; the maximum is only a ceiling.
   const guessed = window.source === "default";
   const approx = m.estimated || guessed ? "≈ " : "";
-  const size = !known ? "—" : window.source === "max" ? `up to ${tokens(max)}` : `${guessed ? "~" : ""}${tokens(max)}`;
-  const usage = m.reply?.usage;
+  // Written as the model menu writes it (32K, 128K), so one window reads the same everywhere.
+  const size = !known ? "—" : window.source === "max" ? `up to ${formatContext(max)}` : `${guessed ? "~" : ""}${formatContext(max)}`;
   const otherModel = m.reply?.model && m.reply.model !== model.id ? getModel(m.reply.model).name : undefined;
   const openModels = () => setSettingsSection("models");
 
-  // At most one notice: the one that most changes how to read the number.
+  // At most one notice: the one that most changes how to read the number, or what happens next. A window this
+  // full summarizes before the next message, which matters more than how the window was found.
   let notice: ReactNode = null;
   if (local && !reachable) {
     notice = (
       <Notice action={<NoticeAction onClick={openModels}>Check connection</NoticeAction>} tone="warn">
         {provider} is not responding, so the window size is unavailable. Usage shown is from saved replies.
+      </Notice>
+    );
+  } else if (local && tone !== "calm") {
+    notice = (
+      <Notice action={roomy ? <NoticeAction onClick={openModels}>Set a context length</NoticeAction> : undefined} tone="warn">
+        {tone === "over" ? "This chat no longer fits. Earlier turns must be summarized before your next message is sent." : "Nearly full. Earlier turns will be summarized before your next message is sent."}
+        {roomy ? ` This model takes up to ${formatContext(ceiling)} but runs with ${formatContext(max)} here.` : ""}
       </Notice>
     );
   } else if (!known && model.runtime === "ollama") {
@@ -353,29 +368,40 @@ export function ContextMeter() {
                 )}
               </div>
               {/* One bar for the whole window: each part takes its share of it, and what is left is free. */}
-              <div
-                aria-hidden
-                className={cn(
-                  "flex h-1.5 gap-px overflow-hidden rounded-full",
-                  gauged ? "bg-foreground/10" : "bg-[repeating-linear-gradient(90deg,color-mix(in_oklab,var(--color-foreground)_15%,transparent)_0_3px,transparent_3px_7px)]"
+              <div className="relative">
+                <div
+                  aria-hidden
+                  className={cn(
+                    "flex h-1.5 gap-px overflow-hidden rounded-full",
+                    gauged ? "bg-foreground/10" : "bg-[repeating-linear-gradient(90deg,color-mix(in_oklab,var(--color-foreground)_15%,transparent)_0_3px,transparent_3px_7px)]"
+                  )}
+                >
+                  {m.parts.length > 0
+                    ? m.parts.map((part) => (
+                        <div className={cn("h-full shrink-0 transition-[width] duration-500 ease-out", part.shade)} key={part.key} style={{ width: `${(part.tokens / scale) * 100}%` }} />
+                      ))
+                    : gauged && (
+                        <div
+                          className={cn(
+                            "h-full shrink-0 rounded-full transition-[width] duration-500 ease-out",
+                            tone === "calm" && "bg-foreground/75",
+                            tone === "near" && "bg-amber-500",
+                            tone === "over" && "bg-red-500",
+                            m.estimated && "opacity-60"
+                          )}
+                          style={{ width: `${Math.min(100, ratio * 100)}%` }}
+                        />
+                      )}
+                </div>
+                {/* Where the harness summarizes earlier turns before the next message. It stays within the bar's height;
+                    the popover-coloured sides keep it apart from the parts it crosses. */}
+                {gauged && local && (
+                  <div
+                    aria-hidden
+                    className="absolute inset-y-0 w-[3px] -translate-x-1/2 border-x border-popover bg-foreground/60 transition-[left] duration-500 ease-out"
+                    style={{ left: `${((line * max) / scale) * 100}%` }}
+                  />
                 )}
-              >
-                {m.parts.length > 0
-                  ? m.parts.map((part) => (
-                      <div className={cn("h-full shrink-0 transition-[width] duration-500 ease-out", part.shade)} key={part.key} style={{ width: `${(part.tokens / scale) * 100}%` }} />
-                    ))
-                  : gauged && (
-                      <div
-                        className={cn(
-                          "h-full shrink-0 rounded-full transition-[width] duration-500 ease-out",
-                          tone === "calm" && "bg-foreground/75",
-                          tone === "near" && "bg-amber-500",
-                          tone === "over" && "bg-red-500",
-                          m.estimated && "opacity-60"
-                        )}
-                        style={{ width: `${Math.min(100, ratio * 100)}%` }}
-                      />
-                    )}
               </div>
               <div className="mt-1.5">
                 {m.parts.map((part) => (

@@ -1,6 +1,6 @@
 "use client";
 
-import { CodeBlock } from "@/components/ai-elements/code-block";
+import { DiffView } from "./diff-view";
 import { FileTree, FileTreeFile, FileTreeFolder } from "@/components/ai-elements/file-tree";
 import {
   Terminal,
@@ -191,7 +191,7 @@ function ChangesTab({ ws }: { ws: WorkspaceData }) {
               <span className="text-red-500">−{current.deletions}</span>
               <UndoFileEdits changes={current.changes} key={current.path} path={current.path} />
             </div>
-            <CodeBlock className="rounded-none border-x-0 text-xs" code={current.patch} language="diff" showLineNumbers />
+            <DiffView className="rounded-none" patch={current.patch} />
           </ScrollArea>
         )}
       </div>

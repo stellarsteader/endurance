@@ -3,8 +3,8 @@
  * request records (model, provider, origin, outcome, optional contents, at most 100 kept for 30 days). Portions
  * derived from opencode (MIT; notice: ../harness/vendor/LICENSE). Uses Node's built-in SQLite so no native module is shipped.
  *
- * What a person wrote is stored encrypted (./vault): chat titles, messages, project names, instructions and
- * folders, and kept request contents. IDs, times, token counts and request outcomes stay readable for ordering.
+ * What a person wrote is stored encrypted (./vault): chat titles, messages, project names, instructions,
+ * folders and Always allow rules, and kept request contents. IDs, times, token counts and request outcomes stay readable for ordering.
  */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -12,6 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { HistoryRequest, HistorySession, HistorySettings, RequestStatus, SessionInput } from "../lib/history-api";
 import { MAX_INSTRUCTIONS, type StoredProject } from "../lib/workspace-api";
 import { isApproval, isEffort, type AppUIMessage, type ChatChoice } from "../lib/types";
+import { cleanRules } from "../lib/permissions";
 import { sanitizePolicy } from "../lib/workspace-policy";
 import type { Vault } from "./vault";
 
@@ -21,6 +22,8 @@ const MAX_CONTENT = 2_000_000;
 const ID = /^[A-Za-z0-9_-]{1,100}$/;
 /** From this version on, what a person wrote is encrypted. */
 const ENCRYPTED = 4;
+/** Projects keep their Always allow rules (lib/permissions). */
+const PROJECT_RULES = 5;
 
 /** Where each encrypted value is stored; a value only opens in the place it was sealed for. */
 export const at = {
@@ -29,6 +32,7 @@ export const at = {
   name: (project: string) => `project.name/${project}`,
   instructions: (project: string) => `project.instructions/${project}`,
   access: (project: string) => `project.access/${project}`,
+  rules: (project: string) => `project.rules/${project}`,
   content: (request: string) => `request.content/${request}`,
 };
 
@@ -58,11 +62,12 @@ const validId = (value: unknown): value is string => typeof value === "string" &
 /** A chat's own model, effort and approval mode as stored: only well-formed fields, or nothing. */
 function cleanChoice(value: unknown): ChatChoice | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const { model, effort, approval } = value as Record<string, unknown>;
+  const { model, effort, approval, planFirst } = value as Record<string, unknown>;
   const choice: ChatChoice = {
     ...(typeof model === "string" && model && model.length <= 600 ? { model } : {}),
     ...(isEffort(effort) ? { effort } : {}),
     ...(isApproval(approval) ? { approval } : {}),
+    ...(planFirst === true ? { planFirst } : {}),
   };
   return Object.keys(choice).length ? choice : undefined;
 }
@@ -80,6 +85,7 @@ function cleanProject(input: StoredProject): StoredProject {
   const name = typeof input.name === "string" ? input.name.trim().slice(0, 200) : "";
   if (!name) throw new Error("Name the project.");
   const access = input.access ? sanitizePolicy(input.access) : undefined;
+  const alwaysAllowed = cleanRules(input.alwaysAllowed);
   return {
     id: input.id,
     name,
@@ -88,6 +94,7 @@ function cleanProject(input: StoredProject): StoredProject {
     collapsed: input.collapsed === true,
     instructions: typeof input.instructions === "string" && input.instructions ? input.instructions.slice(0, MAX_INSTRUCTIONS) : undefined,
     access: access?.folders.length ? access : undefined,
+    alwaysAllowed,
   };
 }
 
@@ -238,11 +245,17 @@ export class HistoryStore {
       if (!columns.some((column) => column.name === "choice")) this.db.exec("ALTER TABLE session ADD COLUMN choice TEXT;");
       this.db.exec("PRAGMA user_version = 3;");
     }
+    if (version < PROJECT_RULES) {
+      // Before encrypting an older history, which rewrites every project's values, this column among them.
+      const columns = this.db.prepare("PRAGMA table_info(project)").all() as { name: string }[];
+      if (!columns.some((column) => column.name === "rules")) this.db.exec("ALTER TABLE project ADD COLUMN rules TEXT;");
+    }
     if (version < ENCRYPTED) {
       this.transaction(() => this.encryptAll(key));
       // The plaintext is gone from the tables; rebuild the file so none is left in free pages or the log.
       this.db.exec("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);");
     }
+    if (version < PROJECT_RULES) this.db.exec(`PRAGMA user_version = ${PROJECT_RULES};`);
   }
 
   /** Encrypts what an older version stored as text, in one transaction. Values already encrypted are left as they are. */
@@ -278,10 +291,11 @@ export class HistoryStore {
       row.session_id,
       row.id,
     ]);
-    run("SELECT id, name, instructions, access FROM project", "UPDATE project SET name = ?, instructions = ?, access = ? WHERE id = ?", (row) => [
+    run("SELECT id, name, instructions, access, rules FROM project", "UPDATE project SET name = ?, instructions = ?, access = ?, rules = ? WHERE id = ?", (row) => [
       write(row.name, at.name(row.id)),
       write(row.instructions, at.instructions(row.id)),
       write(row.access, at.access(row.id)),
+      write(row.rules, at.rules(row.id)),
       row.id,
     ]);
     run("SELECT id, content FROM request", "UPDATE request SET content = ? WHERE id = ?", (row) => [write(row.content, at.content(row.id)), row.id]);
@@ -484,6 +498,7 @@ export class HistoryStore {
         ...(row.collapsed ? { collapsed: true } : {}),
         ...(row.instructions ? { instructions: this.open(row.instructions, at.instructions(id)) } : {}),
         ...(row.access ? { access: sanitizePolicy(JSON.parse(this.open(row.access, at.access(id)))) } : {}),
+        ...(row.rules ? { alwaysAllowed: cleanRules(JSON.parse(this.open(row.rules, at.rules(id)))) } : {}),
       };
     });
   }
@@ -532,9 +547,9 @@ export class HistoryStore {
   private upsertProject(project: StoredProject) {
     this.db
       .prepare(
-        `INSERT INTO project (id, name, time_created, time_updated, pinned, collapsed, instructions, access) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO project (id, name, time_created, time_updated, pinned, collapsed, instructions, access, rules) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET name = excluded.name, time_updated = excluded.time_updated, pinned = excluded.pinned,
-           collapsed = excluded.collapsed, instructions = excluded.instructions, access = excluded.access`
+           collapsed = excluded.collapsed, instructions = excluded.instructions, access = excluded.access, rules = excluded.rules`
       )
       .run(
         project.id,
@@ -544,7 +559,9 @@ export class HistoryStore {
         project.pinned ? 1 : 0,
         project.collapsed ? 1 : 0,
         project.instructions ? this.seal(project.instructions, at.instructions(project.id)) : null,
-        project.access ? this.seal(JSON.stringify(project.access), at.access(project.id)) : null
+        project.access ? this.seal(JSON.stringify(project.access), at.access(project.id)) : null,
+        // A rule's program can be a path, so the rules are sealed like the folders.
+        project.alwaysAllowed ? this.seal(JSON.stringify(project.alwaysAllowed), at.rules(project.id)) : null
       );
   }
 

@@ -16,6 +16,8 @@ export interface ChatChoice {
   model?: string;
   effort?: Effort;
   approval?: Approval;
+  /** The agent proposes a plan and waits for approval before it changes anything (harness/agent planGate). */
+  planFirst?: boolean;
 }
 
 export const APPROVAL_MODES: readonly Approval[] = ["ask", "auto", "full"];
@@ -54,6 +56,11 @@ export interface Usage {
   decodeMs?: number;
   /** Context window the turn ran with. */
   window?: number;
+  /**
+   * Output the next request on this model keeps free, as the harness planned it when the turn ended (harness/budget):
+   * older turns are summarized once a request passes `window − reserve`.
+   */
+  reserve?: number;
   /** The prompt count is the harness's estimate: the runtime's own count left out its cached part (harness/budget). */
   estimated?: boolean;
 }
@@ -108,6 +115,8 @@ export interface CotStep {
   files?: string[];
   /** Why a step was blocked or failed, such as "No access". */
   note?: string;
+  /** The whole message when the note is only its start, opened from the note. */
+  detail?: string;
   /** The step ran but did not work, such as a file that does not exist. Not counted as done work. */
   failed?: boolean;
   /** For a reasoning row: what the model thought, streamed while it chose the next step. */

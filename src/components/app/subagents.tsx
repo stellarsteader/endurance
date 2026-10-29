@@ -48,6 +48,12 @@ function AgentMark({ status }: { status: SubagentData["status"] }) {
   );
 }
 
+/** An explore subagent only reads and searches (harness/agent runSubagent); a worker may change files and has no mark. */
+function ReadOnlyMark({ agent }: { agent: SubagentData }) {
+  if (agent.role !== "explore") return null;
+  return <span className="shrink-0 rounded-[4px] border px-1 text-[11px] leading-[1.45] text-muted-foreground">Read only</span>;
+}
+
 function AgentRow({ agent }: { agent: SubagentData }) {
   const { agentId, openAgent } = useSession();
   const now = useNow(agent.status === "running");
@@ -62,6 +68,7 @@ function AgentRow({ agent }: { agent: SubagentData }) {
     >
       <AgentMark status={agent.status} />
       <span className="min-w-0 flex-1 truncate font-medium text-[15px] leading-[1.6]">{agent.name}</span>
+      <ReadOnlyMark agent={agent} />
       {agent.startedAt && (
         <span className="shrink-0 text-[13px] leading-[1.4] text-muted-foreground tabular-nums">
           {formatElapsed(elapsedOf(agent, now))}
@@ -116,6 +123,7 @@ export function SubagentTrace({ agents }: { agents: SubagentData[] }) {
           >
             <SubagentStatusIcon className="size-[15px]" status={agent.status} />
             <span className="shrink-0 text-[13px] leading-[1.4]">{agent.name}</span>
+            <ReadOnlyMark agent={agent} />
             <span className="min-w-0 flex-1 truncate text-[13px] leading-[1.4] text-muted-foreground">{line}</span>
             {agent.startedAt && (
               <span className="shrink-0 text-[12px] leading-[1.35] text-muted-foreground tabular-nums">

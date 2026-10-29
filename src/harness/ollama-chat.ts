@@ -137,6 +137,16 @@ const lowerMessages = Effect.fn("OllamaChat.lowerMessages")(function* (request: 
       else if (part.type === "tool-call" && message.role === "assistant") calls.push({ id: part.id, function: { name: part.name, arguments: part.input ?? {} } });
       else return yield* ProviderShared.unsupportedContent("Ollama", message.role, message.role === "user" ? ["text", "media"] : ["text", "reasoning", "tool-call"]);
     }
+    const previous = messages.at(-1);
+    if (message.role === "user" && previous?.role === "user") {
+      // Some chat templates (Gemma; older Mistral) refuse two user messages in a row, which the harness can
+      // produce (a compaction summary, or a system update, before the latest user message). The two become one
+      // turn, in order: text a blank line apart, images one after the other. Only user follows user here.
+      const content = [previous.content, text.join("\n\n")].filter((piece) => piece !== "").join("\n\n");
+      const merged = [...(previous.images ?? []), ...images];
+      messages[messages.length - 1] = { ...previous, content, ...(merged.length ? { images: merged } : {}) };
+      continue;
+    }
     messages.push({
       role: message.role,
       // A user message's parts are the user's text and what the app adds beside it (attached files, notes), so a

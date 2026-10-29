@@ -84,7 +84,7 @@ const SUMMARY: Partial<Record<CotKind, (n: number) => string>> = {
   web: (n) => `searched the web ${times(n)}`,
   page: (n) => `read ${count(n, "web page")}`,
   delegate: (n) => `asked subagents ${times(n)}`,
-  verify: (n) => `ran ${count(n, "check")}`,
+  verify: (n) => `ran ${count(n, "command")}`,
   blocked: (n) => `${n} blocked`,
   skill: (n) => `used ${count(n, "skill")}`,
 };

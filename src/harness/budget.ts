@@ -122,6 +122,9 @@ const cleared = (label: string) => `[${label}. ${CLEARED}`;
 /** Whether a tool result is the line left by clearing, so the call may run again (./agent). */
 export const isCleared = (text: string) => text.endsWith(CLEARED);
 
+/** Results never cleared: the person's answers. */
+const KEPT: ReadonlySet<string> = new Set(["ask_user", "propose_plan"]);
+
 /**
  * Clears tool results of the run, oldest first, until the request fits well under its limit. Messages before
  * `from` are the conversation and stay. The results of the latest step stay whole: the model is reading them.
@@ -142,6 +145,9 @@ export function clearResults(system: string, history: readonly Message[], from: 
     if (index > latest) continue;
     let replacement: Message | undefined;
     const part = message.content[0];
+    // The person's answer to a question or a plan stays: it is short, and cleared, the model asked again what was
+    // already answered (Nemotron e4b, in the app).
+    if (message.role === "tool" && part?.type === "tool-result" && KEPT.has(part.name)) continue;
     if (message.role === "tool" && part?.type === "tool-result" && !(part.result.type === "text" && isCleared(String(part.result.value))))
       replacement = Message.tool({ id: part.id, name: part.name, result: cleared(labelOf(part.id)), resultType: "text" });
     const text = message.role === "user" ? textOf(message) : "";

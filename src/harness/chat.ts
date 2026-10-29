@@ -7,12 +7,13 @@ import { OpenAICompatibleChat } from "./vendor/llm/protocols/openai-compatible-c
 import { Ollama } from "./vendor/schema/ollama";
 import { OllamaChat } from "./ollama-chat";
 import { Message, type ContentPart, type LLMEvent } from "./vendor/llm/schema";
+import type { ModelReasoningField } from "./vendor/llm/schema/options";
 import { endpoint } from "./runtime";
 import { carryCounts, compactHistory, summaryMessage } from "./compaction";
 import { skillCatalog, type SkillEntry } from "./skills";
 import { streamReply } from "./reply";
 import { thinkingRequest } from "./thinking";
-import { measure, modelProfile, recheckWindow, windowFromError, withLiveWindow } from "./profile/models";
+import { measure, modelProfile, nextReserve, recheckWindow, windowFromError, withLiveWindow } from "./profile/models";
 import { budgetFor, isEstimatedPrompt } from "./budget";
 import { hasLarge } from "./documents";
 import { hasAttachments, type Reader } from "./attachments";
@@ -29,12 +30,16 @@ import type { CallInfo } from "./guarded";
 import type { ThinkingSwitchChoice } from "../lib/thinking-switch";
 import type { SamplingSets } from "../lib/sampling";
 import { runtimeName, type RuntimeConnection, type RuntimeId, type ServerLocation } from "../lib/models";
+import { noteChars, replyNote } from "./earlier";
+import { APP_NOTE_GUIDE, appNote, builtPart, isBuilt, quoteTags } from "./app-note";
 
 export interface ChatRequest extends Omit<ChatSettings, "defaultApproval"> {
   /** The chat's ID; a side chat has its own. Requests for the chat on screen go first (see ./limit). */
   id?: string;
   /** This chat's approval mode. */
   approval: Approval;
+  /** The person turned on Plan first for this chat: nothing changes before a plan is approved (./agent). */
+  planFirst?: boolean;
   messages: AppUIMessage[];
   runtime: RuntimeId;
   runtimeModelId: string;
@@ -79,6 +84,15 @@ export interface ChatRequest extends Omit<ChatSettings, "defaultApproval"> {
  * access at all ("as a local model I cannot…"), instead of saying what the person can change. Small models follow a
  * stated fact better than a condition, and the text is the same on every request, so the prompt stays cached.
  */
+/**
+ * Today's date on this computer, for every model: one trained long ago otherwise takes its training year for this
+ * one. The date alone, not the time, so the system prompt changes once a day rather than on every request.
+ */
+export function todayNote(now = new Date()) {
+  const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  return `Today is ${day}.`;
+}
+
 export function plainChatNote(body: Pick<ChatRequest, "projectName">) {
   const where = body.projectName ? `This chat is in the project "${body.projectName}", which has no folders.` : "This chat is not in a project.";
   return (
@@ -176,13 +190,36 @@ export function validate(body: ChatRequest) {
   if (!Array.isArray(body.messages) || typeof body.runtimeModelId !== "string" || !body.runtimeModelId) throw new Error("Choose a model from a connected local runtime.");
 }
 /** Ollama is called on its own /api/chat (see ./ollama-chat); every other runtime on its OpenAI-compatible API. */
+/**
+ * The thinking fields each OpenAI-compatible server is sent, by its address. Both go until a server refuses one as
+ * a field it does not know; that one is left out from then on (rejectedReasoningField).
+ */
+const reasoningFields = new Map<string, ModelReasoningField[]>();
+const BOTH_FIELDS: ModelReasoningField[] = ["reasoning_content", "reasoning"];
+
+/**
+ * Whether the error refuses one of the thinking fields as unknown, as strict servers word it ("Extra inputs are not
+ * permitted", "Unrecognized request argument", "unknown field"); if so, that field is not sent to this server again.
+ */
+export function rejectedReasoningField(body: ChatRequest, message: string) {
+  if (body.runtime === "ollama" || !/extra inputs|not permitted|unrecogni[sz]ed|unknown (?:field|argument|parameter)|unexpected (?:field|keyword|argument)|additional propert/i.test(message)) return false;
+  const field: ModelReasoningField | undefined = /reasoning_content/.test(message) ? "reasoning_content" : /\breasoning\b(?!_)/.test(message) ? "reasoning" : undefined;
+  const key = endpoint(body.connection);
+  const sent = reasoningFields.get(key) ?? BOTH_FIELDS;
+  if (!field || !sent.includes(field)) return false;
+  reasoningFields.set(key, sent.filter((item) => item !== field));
+  return true;
+}
+export const resetReasoningFields = () => reasoningFields.clear();
+
 export function modelFor(body: ChatRequest) {
   const base = endpoint(body.connection);
   const query = body.connection.query ? Object.fromEntries(new URLSearchParams(body.connection.query)) : undefined;
   const settings = { provider: body.runtime, auth: body.connection.apiKey ? Auth.bearer(body.connection.apiKey) : Auth.none, ...(body.connection.headers ? { headers: body.connection.headers } : {}) };
   const where = (baseURL: string) => ({ endpoint: { baseURL, ...(query ? { query } : {}) } });
   const route = body.runtime === "ollama" ? OllamaChat.route.with({ ...settings, ...where(Ollama.baseURL(base)) }) : OpenAICompatibleChat.route.with({ ...settings, ...where(base) });
-  return route.model({ id: body.runtimeModelId });
+  const fields = reasoningFields.get(base);
+  return route.model({ id: body.runtimeModelId, ...(fields ? { compatibility: { reasoningFields: fields } } : {}) });
 }
 /** Thinking turned off for this model: in Models settings, or with Off in the effort menu. */
 export const thinkingOff = (body: Pick<ChatRequest, "thinking" | "effort">) => body.thinking === false || body.effort === "none";
@@ -232,7 +269,7 @@ export function withoutNewImages(messages: AppUIMessage[]): AppUIMessage[] {
   return messages.map((message, index) => {
     if (index !== last) return message;
     const images = message.parts.filter(isImage);
-    const parts = message.parts.map((part): Part => (isImage(part) ? { type: "text", text: `[${imageLabel(images, part)} could not be processed, so its content is not included.]` } : part));
+    const parts = message.parts.map((part): Part => (isImage(part) ? builtPart({ type: "text", text: appNote(`${imageLabel(images, part)} could not be processed, so its content is not included.`) }) : part));
     return { ...message, parts };
   });
 }
@@ -249,14 +286,15 @@ export function imageNote(body: Pick<ChatRequest, "messages" | "visionSupported"
     : "You cannot see images: this model does not take image input, so images in this chat are not sent to you.";
 }
 
-export function toMessages(input: AppUIMessage[], options: { vision?: boolean } = {}) {
+export function toMessages(input: AppUIMessage[], options: { vision?: boolean; window?: number } = {}) {
   const last = input.findLastIndex((message) => message.role === "user");
   return input.map((message, index) => {
     const images = message.parts.filter(isImage);
     // The images that go as image input, in order, for the line that lists them.
     const sent: FilePart[] = [];
     const content: ContentPart[] = message.parts.flatMap((part): ContentPart[] => {
-      if (part.type === "text") return [{ type: "text", text: part.text }];
+      // What the person, a file or a page wrote cannot pass for the app's notes; what the app built keeps them.
+      if (part.type === "text") return [{ type: "text", text: isBuilt(part) ? part.text : quoteTags(part.text) }];
       // An attached document is read into text before the conversation is built (./attachments); here it is only checked.
       if (part.type === "file" && attachmentId(part.url)) {
         if (!documentFormat(part.mediaType, part.filename)) throw new Error(`${part.filename ?? "The attachment"} can't be read. Attach PDF, Word, Excel, CSV or text files.`);
@@ -267,30 +305,33 @@ export function toMessages(input: AppUIMessage[], options: { vision?: boolean } 
       if (part.mediaType.startsWith("image/")) {
         if (!part.url.startsWith("data:")) throw new Error(`${part.filename ?? "An image"} could not be read. Attach it again.`);
         if (options.vision !== false) {
-          if (!sendable(part.url)) return [{ type: "text", text: `[${imageLabel(images, part)} is in a format that can't be sent as image input, so its content is not included.]` }];
+          if (!sendable(part.url)) return [{ type: "text", text: appNote(`${imageLabel(images, part)} is in a format that can't be sent as image input, so its content is not included.`) }];
           sent.push(part);
           return [{ type: "media", mediaType: part.mediaType, data: part.url, filename: part.filename }];
         }
         // After switching to a text-only model, earlier images stay in the chat but are not sent.
         if (index === last) throw new Error("This model doesn't take image input. Switch to a model with image input to ask about images.");
-        return [{ type: "text", text: `[${imageLabel(images, part)} was shared here; this model cannot see it.]` }];
+        return [{ type: "text", text: appNote(`${imageLabel(images, part)} was shared here; this model cannot see it.`) }];
       }
       if (part.mediaType.startsWith("text/") && part.url.startsWith("data:")) {
         const match = /^data:[^,]*;base64,(.*)$/.exec(part.url);
         if (!match) throw new Error("Unsupported text attachment encoding.");
-        return [{ type: "text", text: `[${part.filename ?? "Attachment"}]\n${Buffer.from(match[1], "base64").toString("utf8")}` }];
+        return [{ type: "text", text: `${appNote(`Attached text file: ${part.filename ?? "Attachment"}`)}\n${quoteTags(Buffer.from(match[1], "base64").toString("utf8"))}` }];
       }
       // The composer refuses other formats; one already in the chat stands as a note, so the chat can go on.
-      return [{ type: "text", text: `[${part.filename ?? "A file"} (${part.mediaType || "unknown type"}) was attached; this format can't be read, so its content is not included.]` }];
+      return [{ type: "text", text: appNote(`${part.filename ?? "A file"} (${part.mediaType || "unknown type"}) was attached; this format can't be read, so its content is not included.`) }];
     });
     // Ollama sends a message's text as one string and its images apart, so what is sent is said once, up front, in
     // the order the images go. It speaks of image input, so it does not read like the note left for an image not sent.
     if (sent.length) {
       const names = sent.map((image) => image.filename ?? `image ${images.indexOf(image) + 1}`);
       const list = sent.length > 1 ? `${sent.length} images as image input, in order: ${names.join(", ")}` : `1 image as image input${sent[0].filename ? `: ${sent[0].filename}` : ""}`;
-      content.unshift({ type: "text", text: `[This message includes ${list}.]` });
+      content.unshift({ type: "text", text: appNote(`This message includes ${list}.`) });
     }
-    if (message.role === "user" && typeof message.metadata?.note === "string") content.push({ type: "text", text: `[Note from the app: ${message.metadata.note}]` });
+    if (message.role === "user" && typeof message.metadata?.note === "string") content.push({ type: "text", text: appNote(message.metadata.note) });
+    // A reply's tool calls are not sent; what they did goes first in the message after it (./earlier).
+    const previous = message.role === "user" && index > 0 && input[index - 1].role === "assistant" ? replyNote(input[index - 1], noteChars(options.window)) : undefined;
+    if (previous) content.unshift({ type: "text", text: previous });
     return Message.make({ id: message.id, role: message.role, content });
   });
 }
@@ -333,7 +374,7 @@ export async function chatResponse(request: Request) {
       );
       const instructions = fitInstructions(body.projectInstructions, body.contextWindow);
       if (instructions.cut) writer.write({ type: "data-instructions", data: instructions.cut });
-      const system = [identity(body), instructions.text, plainChatNote(body), imageNote(body), skills].filter(Boolean).join("\n\n");
+      const system = [identity(body), instructions.text, plainChatNote(body), APP_NOTE_GUIDE, imageNote(body), skills, todayNote()].filter(Boolean).join("\n\n");
       // What the request sent, for the context meter's parts (./breakdown).
       let sent: { messages: Message[]; summary?: Message } = { messages: [] };
       const send = async (window: number | undefined) => {
@@ -344,7 +385,7 @@ export async function chatResponse(request: Request) {
         // A summary thinks as the chat does, within the output every call of this model keeps free.
         const compact = async (extra: number) => compactHistory({ messages: body.messages, contextWindow: budget.window || window, system: estimateText(system) + extra, reserve: budget.reserve, model, layer, signal: request.signal, writer, thinking: await thinkingRequest(body, thinks), thinks, ratio, connection: body.connection, tune: (maxTokens) => tuned(body, thinks, { maxTokens }), onUsage: (usage, call) => addSideUsage(side, usage, call) });
         const conversation = (history: Awaited<ReturnType<typeof compact>>) => {
-          const sent = [...(history.summary ? [summaryMessage(history.summary)] : []), ...toMessages(history.rest, { vision: body.visionSupported })];
+          const sent = [...(history.summary ? [summaryMessage(history.summary)] : []), ...toMessages(history.rest, { vision: body.visionSupported, window: budget.window || window })];
           carryCounts(sent, body.messages);
           return sent;
         };
@@ -391,8 +432,11 @@ export async function chatResponse(request: Request) {
         finishReason = await attempt();
       }
       const answered = reported.length ? reported.map((item) => turnUsage(item.usage, window, item.call)).reduce(joinUsage) : undefined;
-      const usage = answered && side.calls ? withSide(answered, side) : answered;
-      const breakdown = breakdownOf({ system: [identity(body), plainChatNote(body), imageNote(body)].filter(Boolean).join("\n\n"), instructions: instructions.text, skills }, 0, sent.messages, sent.messages.length, sent.summary);
+      const joined = answered && side.calls ? withSide(answered, side) : answered;
+      // Where the meter warns that older turns will be summarized, as the next request will plan it.
+      const reserve = joined ? await nextReserve(body, Boolean(body.reasoningSupported) && !thinkingOff(body)) : undefined;
+      const usage = joined && reserve ? { ...joined, reserve } : joined;
+      const breakdown = breakdownOf({ system: [identity(body), plainChatNote(body), APP_NOTE_GUIDE, imageNote(body), todayNote()].filter(Boolean).join("\n\n"), instructions: instructions.text, skills }, 0, sent.messages, sent.messages.length, sent.summary);
       if (usage?.output) breakdown.reply = usage.output;
       writer.write({ type: "finish", finishReason, messageMetadata: { model: body.model, durationMs: Date.now() - started, usage, breakdown } });
     }),
@@ -403,8 +447,10 @@ export async function chatResponse(request: Request) {
  * /compact: summarizes everything before the latest turn now, with the same summarizer automatic compaction
  * uses. The renderer stores the returned part on the conversation, so later requests reuse the summary.
  */
-export async function compactChat(raw: ChatRequest, signal: AbortSignal): Promise<CompactResult> {
+export async function compactChat(raw: ChatRequest & { focus?: string }, signal: AbortSignal): Promise<CompactResult> {
   validate(raw);
+  // What the person wrote after /compact for the summary to keep in particular (compaction.ts PROMPT).
+  const focus = typeof raw.focus === "string" && raw.focus.trim() ? raw.focus : undefined;
   const body = await withLiveWindow(raw);
   const thinks = Boolean(body.reasoningSupported) && !thinkingOff(body);
   const thinking = await thinkingRequest(body, thinks);
@@ -420,6 +466,7 @@ export async function compactChat(raw: ChatRequest, signal: AbortSignal): Promis
     layer,
     signal,
     force: true,
+    focus,
     thinking,
     thinks,
     ratio,

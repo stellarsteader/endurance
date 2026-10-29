@@ -59,6 +59,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { ProjectPermissions } from "./project-permissions";
 import { TerminalAccessSetting } from "./user-terminal";
 
 const ACCESS_ICON: Record<Access, LucideIcon> = {
@@ -482,7 +483,8 @@ function ProjectForm({
   };
   return (
     <Dialog onOpenChange={(open) => !open && onClose()} open>
-      <DialogContent className="gap-5 rounded-[12px] sm:max-w-[34rem]">
+      {/* Scrolls as a whole when the permissions lists make it taller than the window; one column no wider than the dialog. */}
+      <DialogContent className="max-h-[calc(100dvh-4rem)] grid-cols-[minmax(0,1fr)] gap-5 overflow-y-auto rounded-[12px] sm:max-w-[34rem]">
         <DialogHeader>
           <DialogTitle className="text-[15px] leading-[1.6]">
             {title}
@@ -511,6 +513,7 @@ function ProjectForm({
         />
         <ProjectInstructions onChange={setInstructions} value={instructions} />
         {project && <TerminalAccessSetting projectId={project.id} />}
+        {project && <ProjectPermissions projectId={project.id} />}
         <DialogFooter>
           <Button
             className="h-7 rounded-[6px] text-[12px]"

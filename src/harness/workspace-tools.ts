@@ -130,6 +130,188 @@ export const searchTerms = (query: string) =>
     ),
   ].slice(0, MAX_SEARCH_TERMS);
 
+/** Where an edit goes: the characters `start` to `end` of the file give way to `insert`. */
+interface Span {
+  start: number;
+  end: number;
+  insert: string;
+}
+
+const toLF = (text: string) => text.replace(/\r\n/g, "\n");
+const indentOf = (line: string) => /^[ \t]*/.exec(line)![0];
+
+/** The file's own line ending, so a replacement typed with "\n" does not mix endings into a CRLF file. */
+function lineEnding(text: string) {
+  const crlf = text.split("\r\n").length - 1;
+  return crlf > 0 && crlf * 2 >= text.split("\n").length - 1 ? "\r\n" : "\n";
+}
+
+/**
+ * The replacement moved to the file's indentation when the model's first line differs from it by a prefix, as when
+ * it dropped or added a level. Only lines that start with the model's indentation move; blank lines stay blank.
+ */
+function reindent(lines: string[], from: string, to: string) {
+  if (from === to || !(to.startsWith(from) || from.startsWith(to))) return lines;
+  return lines.map((line) => (line.trim() && line.startsWith(from) ? to + line.slice(from.length) : line));
+}
+
+/**
+ * Every place `find` matches in `text`, trying looser comparisons only when stricter ones find nothing, as Codex's
+ * apply_patch seeks lines: small models drop trailing spaces, shift indentation, and never see the "\r" of a CRLF
+ * file. The first stage that finds anything decides, so text that is ambiguous there is refused rather than
+ * matched more loosely. The loose stages match whole lines only, never part of one.
+ */
+function locate(text: string, find: string, replace: string): Span[] {
+  const eol = lineEnding(text);
+  const withEnding = (value: string) => toLF(value).replace(/\n/g, eol);
+
+  // a. Exact.
+  const exact: Span[] = [];
+  for (let at = text.indexOf(find); at >= 0 && exact.length < 2; at = text.indexOf(find, at + 1))
+    exact.push({ start: at, end: at + find.length, insert: eol === "\n" ? replace : withEnding(replace) });
+  if (exact.length) return exact;
+
+  // b. Line endings ignored. Offsets map back to the file by counting the "\r"s dropped before them.
+  const flat = toLF(text);
+  const needle = toLF(find);
+  if (flat !== text || needle !== find) {
+    const dropped: number[] = [];
+    for (let at = text.indexOf("\r\n"); at >= 0; at = text.indexOf("\r\n", at + 2)) dropped.push(at - dropped.length);
+    const original = (at: number) => at + dropped.filter((index) => index < at).length;
+    const spans: Span[] = [];
+    for (let at = flat.indexOf(needle); at >= 0 && spans.length < 2; at = flat.indexOf(needle, at + 1))
+      spans.push({ start: original(at), end: original(at + needle.length), insert: withEnding(replace) });
+    if (spans.length) return spans;
+  }
+
+  // c, d. Line by line, a run of whole file lines. A trailing newline in `find` ends the run at a line end.
+  const lines = text.split("\n");
+  const wanted = needle.split("\n");
+  let body = toLF(replace);
+  if (wanted.length > 1 && wanted.at(-1) === "") {
+    wanted.pop();
+    if (body.endsWith("\n")) body = body.slice(0, -1);
+  }
+  // Blank lines alone would match any blank lines.
+  const anchor = wanted.findIndex((line) => line.trim());
+  if (anchor < 0) return [];
+  const starts = [0];
+  for (const line of lines) starts.push(starts.at(-1)! + line.length + 1);
+  const span = (at: number, insert: string[]): Span => {
+    const last = lines[at + wanted.length - 1];
+    // The matched lines' own ending, "\r" included, stays in place.
+    const end = starts[at + wanted.length - 1] + last.length - (last.endsWith("\r") ? 1 : 0);
+    return { start: starts[at], end, insert: insert.join(eol) };
+  };
+  const stages = [
+    { same: (a: string, b: string) => a.trimEnd() === b.trimEnd(), indent: false },
+    { same: (a: string, b: string) => a.trim() === b.trim(), indent: true },
+  ];
+  for (const { same, indent } of stages) {
+    const found: number[] = [];
+    for (let at = 0; at + wanted.length <= lines.length && found.length < 2; at++)
+      if (wanted.every((line, index) => same(lines[at + index], line))) found.push(at);
+    if (!found.length) continue;
+    return found.map((at) =>
+      span(at, indent ? reindent(body.split("\n"), indentOf(wanted[anchor]), indentOf(lines[at + anchor])) : body.split("\n"))
+    );
+  }
+  return [];
+}
+
+/** Most characters of file lines a failed edit shows back, and of any one of them. */
+const MAX_HINT = 1_500;
+const MAX_HINT_LINE = 200;
+
+/**
+ * The file lines most like `find`, for an edit that matched nothing, so the model can copy the real text instead of
+ * guessing again. Compares as locate's loosest stage does, lines equal after trim: the window of find's length that
+ * holds the most of find's lines, ties to the first. Lines without a letter or digit, such as "}" or blank ones, are
+ * not counted, as they match almost anywhere. Nothing when no line is shared.
+ */
+const wordsOf = (text: string) => new Set(text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+
+/**
+ * With no line of find in the file as written, the line sharing most of its words, with the lines around it: a long
+ * paragraph copied with one character changed (an arrow, a dash) matched no line whole and got no hint at all.
+ */
+function closestByWords(lines: string[], find: string): { line: number; text: string } | undefined {
+  const wanted = wordsOf(find);
+  if (wanted.size < 3) return undefined;
+  let best = 0;
+  let at = -1;
+  lines.forEach((line, index) => {
+    const words = wordsOf(line);
+    let shared = 0;
+    for (const word of words) if (wanted.has(word)) shared++;
+    const score = shared / Math.max(1, Math.min(wanted.size, words.size));
+    if (shared >= 3 && score > best) [best, at] = [score, index];
+  });
+  if (at < 0 || best < 0.5) return undefined;
+  const from = Math.max(0, at - 1);
+  const shown = lines.slice(from, at + 2).map((line) => (line.length > MAX_HINT_LINE ? `${line.slice(0, MAX_HINT_LINE)}…` : line));
+  return { line: from + 1, text: shown.join("\n").slice(0, MAX_HINT) };
+}
+
+function closest(text: string, find: string): { line: number; text: string } | undefined {
+  const lines = toLF(text).split("\n");
+  if (lines.length > 1 && lines.at(-1) === "") lines.pop();
+  const wanted = toLF(find).split("\n");
+  if (wanted.length > 1 && wanted.at(-1) === "") wanted.pop();
+  const need = new Map<string, number>();
+  for (const line of wanted) if (/[\p{L}\p{N}]/u.test(line)) need.set(line.trim(), (need.get(line.trim()) ?? 0) + 1);
+  if (!need.size) return undefined;
+  // A sliding window: each of find's lines counts once, so a line repeated in the file does not count twice.
+  const size = Math.min(wanted.length, lines.length);
+  const have = new Map<string, number>();
+  let score = 0;
+  const count = (line: string, by: 1 | -1) => {
+    const key = line.trim();
+    const limit = need.get(key);
+    if (!limit) return;
+    const now = have.get(key) ?? 0;
+    if (by === 1 ? now < limit : now <= limit) score += by;
+    have.set(key, now + by);
+  };
+  let best = 0;
+  let at = 0;
+  for (let index = 0; index < lines.length; index++) {
+    count(lines[index], 1);
+    if (index >= size) count(lines[index - size], -1);
+    if (index + 1 >= size && score > best) [best, at] = [score, index + 1 - size];
+  }
+  if (!best) return closestByWords(lines, find);
+  // Start at the window's first shared line, with one line before it, so the match is not shown at the bottom.
+  while (!need.has(lines[at].trim())) at++;
+  const from = Math.max(0, at - 1);
+  const shown: string[] = [];
+  let used = 0;
+  for (const line of lines.slice(from, from + wanted.length + 2)) {
+    const cut = line.length > MAX_HINT_LINE ? `${line.slice(0, MAX_HINT_LINE)}…` : line;
+    if (shown.length && used + cut.length + 1 > MAX_HINT) break;
+    shown.push(cut);
+    used += cut.length + 1;
+  }
+  return { line: from + 1, text: shown.join("\n") };
+}
+
+/** A piece of a file as `read` returns it. */
+export interface FileRead {
+  path: string;
+  content: string;
+  binary: boolean;
+  truncated: boolean;
+  /** The first and last line it holds, and how many the file has. */
+  start: number;
+  end: number;
+  lines: number;
+  /** The line to continue from. */
+  next?: number;
+  /** Where in the first line it begins, and where the same line goes on, when a line is longer than the room. */
+  column?: number;
+  nextColumn?: number;
+}
+
 export class AccessDenied extends Error {
   constructor(message: string, readonly target: string, readonly level?: "none" | "read" | "secret") {
     super(message);
@@ -180,6 +362,13 @@ export class Workspace {
   private readonly gitignores = new Map<string, Promise<Ignore | undefined>>();
   /** When this was made: a chat rewound since refuses this run's writes (./file-copies). */
   private readonly started = nextSequence();
+  /**
+   * What the model has seen of each file: real path to the SHA-256 of its bytes when last read or written. Owned by
+   * the caller, since it outlives this per-request Workspace across a paused and resumed run. Unset, writes are not checked.
+   */
+  private reads?: Map<string, string>;
+  /** Edits whose text was not found, per real path, so a model stuck on one file is told another way. */
+  private readonly misses = new Map<string, number>();
   constructor(readonly policy: WorkspacePolicy) {
     this.labels = folderLabels(policy);
   }
@@ -242,6 +431,12 @@ export class Workspace {
     const absolute = path.resolve(folder.path, relative);
     if (!within(folder.path, absolute)) throw new AccessDenied(`${value} is outside this project's folders.`, value);
     return absolute;
+  }
+
+  /** Tracks reads in `reads`, so write refuses to replace a file the model has not seen as it now is. */
+  useReads(reads: Map<string, string>) {
+    this.reads = reads;
+    return this;
   }
 
   label(absolute: string) {
@@ -378,26 +573,41 @@ export class Workspace {
     return { files: found.slice(0, limit).map((file) => file.path), more: found.length > limit || visited >= MAX_MENTION_FILES };
   }
 
-  async read(input: string, from = 1, max = DEFAULT_READ) {
+  /**
+   * The file from line `from`, as much as fits in `max` characters. A line longer than that (minified code, a JSON
+   * file on one line) is read in pieces: `column` is where in the starting line to begin, and `nextColumn` where the
+   * next piece of the same line starts, so a long line is never left half read with nowhere to go on.
+   */
+  async read(input: string, from = 1, max = DEFAULT_READ, column = 0): Promise<FileRead> {
     const { absolute, resolved, shown } = await this.check(input, "read");
     const stat = await fs.stat(resolved).catch((error: unknown) => this.missing(error, absolute, shown));
     if (stat.isDirectory()) throw new AccessDenied(`${shown} is a folder. List it instead.`, shown);
     const handle = await fs.open(resolved, "r");
     try {
       const buffer = Buffer.alloc(Math.min(stat.size, MAX_SEARCH_BYTES));
-      await handle.read(buffer, 0, buffer.length, 0);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
       if (buffer.subarray(0, 8000).includes(0)) return { path: shown, content: "", binary: true, truncated: false, start: 1, end: 0, lines: 0 };
-      const all = buffer.toString("utf8").split("\n");
+      // A CRLF file reads like any other: models do not copy a shown "\r" back, and edit forgives its absence.
+      const all = buffer.toString("utf8").split("\n").map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
       // A file larger than the buffer may end mid-line; its last line is not counted as whole.
       if (stat.size > buffer.length) all.pop();
       const start = Math.min(Math.max(1, Math.floor(from) || 1), Math.max(1, all.length));
-      let end = start - 1;
-      let size = 0;
       const limit = Math.max(200, max);
-      while (end < all.length && (end === start - 1 || size + all[end].length + 1 <= limit)) size += all[end++].length + 1;
-      const content = all.slice(start - 1, end).join("\n").slice(0, limit);
-      const truncated = end < all.length || stat.size > buffer.length;
-      return { path: shown, content, binary: false, truncated, start, end, lines: all.length, ...(end < all.length ? { next: end + 1 } : {}) };
+      const first = all[start - 1] ?? "";
+      const col = Math.min(Math.max(0, Math.floor(column) || 0), first.length);
+      // Any part counts as read: the hash is of the whole file, so a later write knows whether it changed since.
+      if (this.reads)
+        this.reads.set(resolved, contentHash(stat.size > buffer.length ? await fs.readFile(resolved) : buffer.subarray(0, bytesRead)));
+      if (first.length - col > limit) {
+        const nextColumn = col + limit;
+        return { path: shown, content: first.slice(col, nextColumn), binary: false, truncated: true, start, end: start, lines: all.length, column: col, nextColumn };
+      }
+      let end = start;
+      let size = first.length - col + 1;
+      while (end < all.length && size + all[end].length + 1 <= limit) size += all[end++].length + 1;
+      const content = [first.slice(col), ...all.slice(start, end)].join("\n");
+      const truncated = end < all.length || stat.size > buffer.length || col > 0;
+      return { path: shown, content, binary: false, truncated, start, end, lines: all.length, ...(col ? { column: col } : {}), ...(end < all.length ? { next: end + 1 } : {}) };
     } finally {
       await handle.close();
     }
@@ -480,8 +690,8 @@ export class Workspace {
   }
 
   /**
-   * Replaces one exact piece of a file. The text must appear exactly once, so a small model cannot change the
-   * wrong place or rewrite a whole file to change a line.
+   * Replaces one piece of a file. The text must appear exactly once, so a small model cannot change the wrong
+   * place or rewrite a whole file to change a line. Whitespace and line-ending drift is forgiven (see locate).
    */
   edit(input: string, find: string, replace: string): Promise<WriteResult> {
     return agentWrite(this.started, () => this.replaceText(input, find, replace));
@@ -492,31 +702,48 @@ export class Workspace {
     const bytes = await fs.readFile(resolved).catch((error: unknown) => this.missing(error, absolute, shown));
     const before = bytes.toString("utf8");
     if (!find) throw new Error("Edit needs the exact text to replace.");
-    const at = before.indexOf(find);
-    if (at < 0) throw new Error(`The text to replace is not in ${shown}. Read the file and copy the lines exactly, including spaces.`);
-    if (before.indexOf(find, at + 1) >= 0) throw new Error(`The text to replace appears more than once in ${shown}. Include more of the surrounding lines.`);
-    const after = before.slice(0, at) + replace + before.slice(at + find.length);
+    const found = locate(before, find, replace);
+    if (!found.length) {
+      const misses = (this.misses.get(resolved) ?? 0) + 1;
+      this.misses.set(resolved, misses);
+      // Earlier tool results are not resent, so the model may have no copy of the file: show it the nearest lines.
+      const near = closest(before, find);
+      throw new Error(
+        `The text to replace is not in ${shown}. Read the file and copy the lines exactly, including spaces.` +
+          (misses > 1 ? ` Edits to ${shown} have not matched ${misses} times; read it again and copy the lines exactly, or read it and replace it with write.` : "") +
+          (near ? `\n\nClosest lines in ${shown} (from line ${near.line}):\n${near.text}` : "")
+      );
+    }
+    if (found.length > 1) throw new Error(`The text to replace appears more than once in ${shown}. Include more of the surrounding lines.`);
+    const [{ start, end, insert }] = found;
+    const after = before.slice(0, start) + insert + before.slice(end);
     const written = Buffer.from(after, "utf8");
     if (written.byteLength > MAX_WRITE) throw new AccessDenied("That file is too large to write here.", shown);
     // The exact bytes, kept before the write, so the change can be undone.
     const copy = await keepCopy(bytes);
     await fs.writeFile(resolved, written);
-    // One hunk around the change, with up to two lines of context on each side.
+    // The model knows what it wrote, so a write after its own edit is allowed.
+    this.reads?.set(resolved, contentHash(written));
+    // One hunk around the lines the replaced span touched, with up to two lines of context on each side.
     const old = before.split("\n");
     const next = after.split("\n");
-    const first = before.slice(0, at).split("\n").length - 1;
-    const removed = find.split("\n").length;
-    const added = replace.split("\n").length;
+    let first = before.slice(0, start).split("\n").length - 1;
+    let removed = before.slice(start, end).split("\n").length;
+    let added = insert.split("\n").length;
+    // Lines that came out the same, such as context the model repeated or the line after a trailing newline, are not changes.
+    while (removed && added && old[first + removed - 1] === next[first + added - 1]) [removed, added] = [removed - 1, added - 1];
+    while (removed && added && old[first] === next[first]) [first, removed, added] = [first + 1, removed - 1, added - 1];
     const top = Math.max(0, first - 2);
     const tail = Math.min(2, old.length - first - removed);
+    const row = (mark: string) => (line: string) => mark + line.replace(/\r$/, "");
     const patch = [
       `--- a/${shown}`,
       `+++ b/${shown}`,
       `@@ -${top + 1},${first - top + removed + tail} +${top + 1},${first - top + added + tail} @@`,
-      ...old.slice(top, first).map((line) => ` ${line}`),
-      ...old.slice(first, first + removed).map((line) => `-${line}`),
-      ...next.slice(first, first + added).map((line) => `+${line}`),
-      ...old.slice(first + removed, first + removed + tail).map((line) => ` ${line}`),
+      ...old.slice(top, first).map(row(" ")),
+      ...old.slice(first, first + removed).map(row("-")),
+      ...next.slice(first, first + added).map(row("+")),
+      ...old.slice(first + removed, first + removed + tail).map(row(" ")),
     ].join("\n");
     return {
       path: shown,
@@ -548,12 +775,19 @@ export class Workspace {
       if (error instanceof AccessDenied) throw error;
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    // Replacing a file the model has not seen as it now is would drop what it does not know is there; a new file is fine.
+    if (bytes !== undefined && this.reads) {
+      const seen = this.reads.get(resolved);
+      if (seen === undefined) throw new Error(`${shown} already exists and was not read in this request. Read it first, or change part of it with edit.`);
+      if (seen !== contentHash(bytes)) throw new Error(`${shown} has changed since it was read. Read it again first.`);
+    }
     const previous = bytes?.toString("utf8");
     // The exact bytes, kept before the write, so the change can be undone; a new file is undone by deleting it.
     const copy = bytes === undefined ? null : await keepCopy(bytes);
     // Missing parents are created only after the write check on the final path.
     await fs.mkdir(path.dirname(resolved), { recursive: true });
     await fs.writeFile(resolved, written);
+    this.reads?.set(resolved, contentHash(written));
     const before = previous === undefined ? [] : previous.split("\n");
     const after = text.split("\n");
     const patch = [

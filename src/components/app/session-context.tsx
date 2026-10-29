@@ -42,6 +42,8 @@ export interface SessionValue {
   effort: Effort;
   /** This chat's approval mode: its own, or the default for new chats until its first message. */
   approval: Approval;
+  /** Plan first is on for this chat: the agent proposes a plan before it changes anything. */
+  planFirst: boolean;
   /** Picks a model, effort or approval mode for this chat. */
   choose: (patch: ChatChoice) => void;
 }

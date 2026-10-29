@@ -8,6 +8,12 @@
 export const unsupportedTools = (message: string) =>
   /"auto" tool choice requires|tool[ _]choice|does not support tools|tools? (?:are|is) not supported|tool[ _-]call[ _-]parser/i.test(message);
 
+/**
+ * The chat template takes one tool call per message and the history held several, as Llama 3.x templates word it
+ * ("This model only supports single tool-calls at once!").
+ */
+export const singleCallTemplate = (message: string) => /only supports single tool[ _-]?calls?/i.test(message);
+
 /** The runtime streamed a tool call whose arguments are not valid JSON. */
 export const brokenArguments = (message: string) => /Invalid JSON input for .* tool call/i.test(message);
 

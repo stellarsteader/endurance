@@ -1,3 +1,4 @@
+import type { AllowRule } from "./permissions";
 import type { WorkspacePolicy } from "./workspace-policy";
 
 export interface PickedFolder {
@@ -40,6 +41,8 @@ export interface StoredProject {
   collapsed?: boolean;
   instructions?: string;
   access?: WorkspacePolicy;
+  /** What runs without asking in every chat of the project (lib/permissions); removed in Project settings. */
+  alwaysAllowed?: AllowRule[];
 }
 export interface WorkspaceAPI {
   pickFolders(multiple: boolean): Promise<PickedFolder[]>;

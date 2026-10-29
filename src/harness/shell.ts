@@ -14,6 +14,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { SECRET_PATTERNS } from "./workspace-tools";
+import { coveredBy } from "../lib/command-key";
 import type { Approval } from "../lib/types";
 import type { WorkspacePolicy } from "../lib/workspace-policy";
 
@@ -48,9 +49,12 @@ export function checkOnly(command: string) {
   return CHECKS.some((pattern) => pattern.test(text));
 }
 
-/** Ask asks for every command, Approve for me for all but checks, Full access never; Always allow in a chat stops asking there. */
-export function needsApproval(mode: Approval | undefined, command: string, allowedInChat: boolean) {
-  if (mode === "full" || allowedInChat) return false;
+/**
+ * Ask asks for every command, Approve for me for all but checks, Full access never. `allowed` holds the command keys
+ * the person chose Always allow for in this chat (lib/command-key); a command whose every part has one of them runs.
+ */
+export function needsApproval(mode: Approval | undefined, command: string, allowed: ReadonlySet<string>) {
+  if (mode === "full" || coveredBy(command, allowed)) return false;
   if (mode === "auto") return !checkOnly(command);
   return true;
 }

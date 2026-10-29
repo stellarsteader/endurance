@@ -26,6 +26,7 @@ import type { CatalogResult } from "./desktop";
 import type { WorkspacePolicy } from "./workspace-policy";
 import type { HistorySession, SessionInput } from "./history-api";
 import type { StoredProject } from "./workspace-api";
+import type { AllowRule } from "./permissions";
 import { dropDraft } from "./drafts";
 
 export interface Thread {
@@ -67,6 +68,8 @@ export interface Project {
   pinned?: boolean;
   collapsed?: boolean;
   instructions?: string;
+  /** What runs without asking in every chat of the project (lib/permissions). */
+  alwaysAllowed?: AllowRule[];
   /** Names picked by the browser preview, which has no filesystem access. */
   folders?: ProjectFolder[];
   /** Folders and access rules. The desktop main process keeps the copy it enforces. */
@@ -191,7 +194,8 @@ interface StoreActions {
   newThread: (opts?: { temporary?: boolean; projectId?: string | null }) => string;
   /** Project changes resolve once saved; on desktop the main process confirms each one before it shows. */
   createProject: (name: string, access?: WorkspacePolicy, instructions?: string) => Promise<string>;
-  updateProject: (id: string, patch: Partial<Project>) => Promise<void>;
+  /** A patch, or a function of the project as the previous save left it (saves run one after another). */
+  updateProject: (id: string, patch: Partial<Project> | ((project: Project) => Partial<Project>)) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
   restoreProject: (project: Project, threadIds: string[]) => Promise<void>;
   setSidebarView: (patch: Partial<SidebarView>) => void;
@@ -606,10 +610,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [commitProject]
   );
 
+  // Project saves run one after another, each from what the previous one saved, so an Always allow rule added while
+  // Project settings saves, or two rules in a row, are both kept.
+  const projectSaves = useRef<Promise<unknown>>(Promise.resolve());
   const updateProject = useCallback(
-    async (id: string, patch: Partial<Project>) => {
-      const current = projectsRef.current.find((p) => p.id === id);
-      if (current) await commitProject({ ...current, ...patch });
+    (id: string, patch: Partial<Project> | ((project: Project) => Partial<Project>)) => {
+      const save = projectSaves.current
+        .catch(() => undefined)
+        .then(async () => {
+          const current = projectsRef.current.find((p) => p.id === id);
+          if (!current) return;
+          const saved = await commitProject({ ...current, ...(typeof patch === "function" ? patch(current) : patch) });
+          projectsRef.current = projectsRef.current.map((p) => (p.id === saved.id ? saved : p));
+        });
+      projectSaves.current = save;
+      return save;
     },
     [commitProject]
   );

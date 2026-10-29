@@ -196,8 +196,10 @@ export function ImageGallery({ images, className }: { images: ViewerImage[]; cla
   return (
     <>
       {images.length === 1 ? (
-        <button aria-label={`Open ${images[0].name ?? "image"}`} className={cn(tile, "w-fit", className)} onClick={() => open(0)} type="button">
-          <SafeImage alt={images[0].name ?? "Image"} className="block max-h-80 min-h-16 w-auto min-w-16 max-w-[min(100%,22rem)] object-contain" src={images[0].url} />
+        // The cap sits on the tile, whose width the message sets: on the image, 100% would mean the tile, which takes
+        // its width from the image, so the tile would size to the uncapped image and show empty space beside it.
+        <button aria-label={`Open ${images[0].name ?? "image"}`} className={cn(tile, "w-fit max-w-[min(100%,22rem)]", className)} onClick={() => open(0)} type="button">
+          <SafeImage alt={images[0].name ?? "Image"} className="block max-h-80 min-h-16 w-auto min-w-16 max-w-full object-contain" src={images[0].url} />
           {shade}
         </button>
       ) : (

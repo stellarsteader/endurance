@@ -215,10 +215,21 @@ export async function measure(body: ChatRequest, system: string, messages: reado
   // The estimate alone is what the runtime's count teaches the ratio from; the input uses its counts where there are any.
   const estimated = requestTokens(system, messages, 1, extra);
   const input = countedTokens(system, messages, profile.ratio, extra, anchor);
-  const observed = observedOutput(body, thinking);
-  // The profile's window already takes in one the runtime named when a request did not fit.
-  const budget = budgetFor(profile.window ?? body.contextWindow, observed, thinking);
+  const budget = budgetOf(body, profile, thinking);
   return { estimated, input, budget, cap: outputCap(budget, input), ratio: profile.ratio };
+}
+
+// The profile's window already takes in one the runtime named when a request did not fit.
+const budgetOf = (body: ChatRequest, profile: ModelProfile, thinking: boolean) =>
+  budgetFor(profile.window ?? body.contextWindow, observedOutput(body, thinking), thinking);
+
+/**
+ * The output the next request on this model keeps free, with what this turn's calls taught it: the context meter
+ * draws the line where older turns are summarized at the window less this. Undefined without a window.
+ */
+export async function nextReserve(body: ChatRequest, thinking: boolean) {
+  const budget = budgetOf(body, await modelProfile(body), thinking);
+  return budget.window ? budget.reserve : undefined;
 }
 
 /**

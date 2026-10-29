@@ -2,7 +2,7 @@
 
 import { usePromptInputController } from "@/components/ai-elements/prompt-input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { deriveWorkspace } from "@/lib/derive";
+import type { AppUIMessage, TodosData } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
   ArrowDownIcon,
@@ -41,11 +41,20 @@ function ItemAction({ label, onClick, disabled, children }: { label: string; onC
   );
 }
 
-function TodoStrip() {
-  const { chat } = useSession();
-  const [open, setOpen] = useState(false);
-  const todos = useMemo(() => deriveWorkspace(chat.messages).todos, [chat.messages]);
-  if (!todos) return null;
+/**
+ * The to-do list of the current reply: the one in progress, or the last finished one when nothing was sent since.
+ * A list from an earlier reply belongs to that request, so it is not shown once another one starts or follows.
+ */
+function currentTodos(messages: AppUIMessage[]): { reply: string; todos: TodosData } | undefined {
+  const last = messages.at(-1);
+  if (last?.role !== "assistant") return undefined;
+  const part = last.parts.findLast((item) => item.type === "data-todos");
+  return part?.type === "data-todos" ? { reply: last.id, todos: part.data } : undefined;
+}
+
+/** Opens when its list first appears, so the steps are seen once; closed by the person, it stays closed for that list. */
+function TodoStrip({ todos }: { todos: TodosData }) {
+  const [open, setOpen] = useState(true);
   const done = todos.items.filter((t) => t.status === "completed").length;
   const current = todos.items.find((t) => t.status === "in_progress");
 
@@ -96,7 +105,8 @@ function TodoStrip() {
 export function ComposerQueue() {
   const { queue, removeQueued, sendNow, moveQueued, busy, pendingApproval, chat } = useSession();
   const { setInput } = usePromptInputController().textInput;
-  const todos = useMemo(() => deriveWorkspace(chat.messages).todos, [chat.messages]);
+  const current = useMemo(() => currentTodos(chat.messages), [chat.messages]);
+  const todos = current?.todos;
   const showTodos = Boolean(todos && (busy || pendingApproval || todos.items.some((t) => t.status !== "completed")));
 
   if (queue.length === 0 && !showTodos) return null;
@@ -109,7 +119,7 @@ export function ComposerQueue() {
 
   return (
     <div className="mx-2 -mb-3 rounded-t-2xl border border-b-0 bg-muted/50 px-1.5 pt-1.5 pb-4 dark:bg-muted/30">
-      {showTodos && <TodoStrip />}
+      {showTodos && todos && <TodoStrip key={current?.reply} todos={todos} />}
       {showTodos && queue.length > 0 && <div className="mx-2 my-1 h-px bg-border" />}
       {queue.length > 0 && (
         <div>
