@@ -120,7 +120,15 @@ function ModelEditor({
   // A fixed-window server's window bounds the cap; elsewhere the model's maximum bounds the setting.
   const served = store === "cap" ? (details?.context ?? details?.maxContext) : undefined;
   const maximum = store === "cap" ? served : (details?.maxContext ?? model.maxContext ?? 131072);
-  const presets = [...new Set([...CONTEXT_PRESETS.filter((value) => !maximum || (store === "cap" ? value < maximum : value <= maximum)), ...(context ? [context] : [])])].sort((a, b) => a - b);
+  // The maximum is a choice of its own: a 128,000-token model would otherwise stop at the 64K preset below it.
+  // A cap's maximum is the default item instead.
+  const presets = [
+    ...new Set([
+      ...CONTEXT_PRESETS.filter((value) => !maximum || (store === "cap" ? value < maximum : value <= maximum)),
+      ...(maximum && store !== "cap" ? [maximum] : []),
+      ...(context ? [context] : []),
+    ]),
+  ].sort((a, b) => a - b);
   const setting = details ? contextSetting(store, details, preference.contextLimit) : undefined;
   // Ollama's setting cannot be taken back to its default from here; a cap can, back to the server's window.
   const contextChanged = context !== setting && (store === "cap" || context !== undefined);

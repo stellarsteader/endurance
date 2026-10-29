@@ -76,7 +76,7 @@ export interface HFFile {
   shard?: boolean;
   projector?: boolean;
 }
-export type Modality = "text" | "image";
+export type Modality = "text" | "image" | "audio";
 export interface HFModel {
   id: string;
   downloads?: number;

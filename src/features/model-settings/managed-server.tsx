@@ -50,7 +50,8 @@ function ManagedEditor({ connection, model, info, onDone }: { connection: Connec
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connection.id, model.id, window]);
   const longest = model.maxWindow ?? 131072;
-  const presets = [...new Set([...WINDOWS.filter((value) => value <= longest), ...(window ? [window] : [])])].sort((a, b) => a - b);
+  // The longest window is a choice of its own, even when it falls between presets (128,000).
+  const presets = [...new Set([...WINDOWS.filter((value) => value <= longest), longest, ...(window ? [window] : [])])].sort((a, b) => a - b);
   const autoLabel = plan && window === undefined ? `Most that fits · ${formatContext(plan.window)}` : "Most that fits";
   const save = async () => {
     if (invalidFields(sampling).length) return;

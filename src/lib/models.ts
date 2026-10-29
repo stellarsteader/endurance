@@ -195,9 +195,13 @@ const compactNumber = new Intl.NumberFormat("en-US", { notation: "compact", maxi
 /** A token count as the chat shows it: 999, 1.2K, 34.2K. */
 export const formatTokens = (n: number) => compactNumber.format(Math.max(0, Math.round(n)));
 
+/**
+ * A context size as models are named: 131,072 and 32,768 in binary steps (128K, 32K), 128,000 in decimal ones
+ * (128K, not 125K, though it is 125 × 1024 too).
+ */
 export const formatContext = (n: number) =>
   !n
     ? "Unknown"
-    : n % 1024 === 0
+    : n % 1000 !== 0 && n % 1024 === 0
       ? n >= 1_048_576 ? `${n / 1_048_576}M` : `${n / 1024}K`
-      : n >= 1_000_000 ? `${n / 1_000_000}M` : `${Math.round(n / 1000)}K`;
+      : n >= 1_000_000 ? `${Math.round(n / 100_000) / 10}M` : `${Math.round(n / 1000)}K`;
