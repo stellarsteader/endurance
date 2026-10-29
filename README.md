@@ -15,22 +15,35 @@
   <img src="https://img.shields.io/badge/Python-000000?style=flat&amp;logo=python&amp;logoColor=white" height="20" alt="Python" title="Python" />&nbsp;
 </p>
 
-ENDURANCE is a desktop chat app for AI models you run yourself. Your models can work in project folders, edit files, run commands, search the web and use skills. Connect Ollama, LM Studio, llama.cpp, vLLM, or another compatible runtime on your computer or a server you operate. Projects, conversations, file access, tools and model settings stay under your control.
+ENDURANCE is a desktop chat app for AI models you run yourself. Connect Ollama, LM Studio, llama.cpp, vLLM or another compatible runtime, on your computer or on a server you operate, and let your models work in project folders, use tools and search the web. Chats and projects stay on your computer, encrypted.
+
+<p align="center">
+  <img src="docs/assets/architecture.svg" width="960" alt="Endurance architecture: the app sends prompts through the main process to the agent harness, which calls model runtimes on this computer or on your GPU server and streams events back to the chat thread" />
+</p>
 
 ## What it does
 
-- **Chat with your own models.** Ollama, LM Studio, llama.cpp, vLLM and other local runtimes, or a server on your network or elsewhere. Each chat can use any of them.
-- **Models.** Download from Hugging Face or the Ollama library, and set each model's name, context length, thinking and sampling.
-- **Projects.** Give chats folders to work in, each Read & write, Read only or No access.
-- **Agent.** In a project, the model reads, searches and edits files, runs shell commands in a sandbox, keeps a to-do list and can propose a plan for you to approve.
-- **Subagents.** The agent can hand separate pieces of work to subagents, which report back.
-- **Skills.** Add skill folders in Library and name a skill in a message to use it.
+- **Chat with your own models.** Use a runtime on this computer or on any server you can reach, and pick the model per chat.
+- **Models.** Set each model's name, context length, thinking and sampling.
+- **Projects.** Organize chats around the folders they work in. Every chat in a project shares its folders, instructions and permissions.
+- **Agent.** Works directly in your project, from code exploration to test runs, with every change tracked as a reviewable, reversible diff.
+- **Plans and to-dos.** The agent proposes a plan for you to approve and keeps a to-do list as it works. Turn on Plan first to make it plan before changing anything.
+- **Questions.** When a decision is yours to make, the agent asks and offers options, as single or multiple choice.
+- **Subagents.** Large tasks are split among subagents, each working in a fresh context. Explorers only read, and workers change only the files they are given.
+- **Skills.** Add skill folders in Library; the agent uses one when a request matches it, or when you name it.
 - **Web.** With Internet Access on, the model searches the web, reads pages and cites its sources.
-- **Attachments.** Images, PDF, Word, Excel, CSV and text files. Scanned pages are read by a model that sees images.
-- **Long chats.** When a chat no longer fits the model, its older messages are summarized so it can go on.
-- **Approvals.** Choose whether the agent asks before going online or running commands.
-- **History.** Chats stay on your computer.
-- **Your own GPU server.** `server/` sets up a manager that runs vLLM models on it. See `server/README.md`.
+- **Attachments.** Images, PDF, Word, Excel, CSV and text files. Scanned pages are read by a vision model you choose, even when the chat model reads only text.
+- **Long chats.** A context meter shows how full the model's window is. Older messages are summarized once a chat outgrows it.
+- **Your own GPU server.** Deploy the Endurance server manager on your GPU machine and connect it to Endurance. It serves every vLLM model on the machine through one address, at the context length you choose. See `server/README.md`.
+
+## Security
+
+- **Encrypted history.** Chats and projects are stored encrypted on your computer, with the key in your system keychain.
+- **Project access.** In Project settings, set each folder, subfolder or file to Read & write, Read only or No access, and manage the commands the agent may run without asking in one list.
+- **Approvals and Internet Access.** Each chat sets how much the agent does without asking, from Ask for approval to Approve for me or Full access. Internet Access turns the web on or off.
+- **Sandboxed commands.** Commands run inside your project folders and can change files only where you allowed writing.
+- **Secrets stay closed.** Files such as `.env` and private keys can be listed but never opened or changed.
+- **Content is labelled by source.** Notes the app adds to a chat carry the app's mark, which text from files, web pages or tools cannot carry.
 
 ## Install
 
@@ -48,7 +61,7 @@ There are no prebuilt downloads yet. Build the app on your Mac:
 
    On an Intel Mac, use `--x64` instead of `--arm64`.
 3. Open `release/mac-arm64/Endurance.app` (Intel: `release/mac/Endurance.app`). Drag it to Applications to keep it. From then on the app runs without a terminal or Node.
-4. Start a model runtime such as Ollama or LM Studio. Endurance lists servers running at their default address; add any other server with **Add server**.
+4. Start a model runtime such as Ollama or LM Studio. Endurance finds runtimes on this computer by itself; connect any other server with **Add server**.
 
 Your chats, projects, settings and connections are kept in `~/Library/Application Support/Endurance` on your Mac.
 
