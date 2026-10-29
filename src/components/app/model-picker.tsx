@@ -78,7 +78,7 @@ export function ModelPicker() {
         </ModelSelectorList>
         <div className="flex items-center justify-between border-t px-3 py-2 text-muted-foreground text-xs">
           <span className="flex items-center gap-3">
-            <span className="flex items-center gap-1"><BrainIcon className="size-3" />Reasoning</span>
+            <span className="flex items-center gap-1"><BrainIcon className="size-3" />Thinking</span>
             <span className="flex items-center gap-1"><EyeIcon className="size-3" />Vision</span>
             <span className="flex items-center gap-1"><WrenchIcon className="size-3" />Tools</span>
           </span>

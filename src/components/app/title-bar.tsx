@@ -5,18 +5,21 @@ import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useStore, type Thread } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import { GhostIcon, PanelLeftIcon, PanelRightCloseIcon, PanelRightOpenIcon, SquarePenIcon } from "lucide-react";
+import { GhostIcon, PanelLeftIcon, PanelRightIcon, SquarePenIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 export function TitleBarButton({
   label,
   shortcut,
   onClick,
+  pressed,
   children,
 }: {
   label: string;
   shortcut?: string;
   onClick: () => void;
+  /** A toggle that is on shows the full fill, as open and selected controls do (DESIGN.md: States). */
+  pressed?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -25,7 +28,8 @@ export function TitleBarButton({
         render={
           <Button
             aria-label={label}
-            className="size-7 text-muted-foreground [&_svg]:size-[15px]"
+            aria-pressed={pressed}
+            className={cn("size-7 text-muted-foreground [&_svg]:size-[15px]", pressed && "bg-muted text-foreground hover:bg-muted")}
             onClick={onClick}
             size="icon-sm"
             variant="ghost"
@@ -67,8 +71,8 @@ export function WindowControls() {
 export function WorkspaceToggle() {
   const { setWorkspaceOpen, workspaceOpen } = useStore();
   return (
-    <TitleBarButton label="Toggle workspace" onClick={() => setWorkspaceOpen((v) => !v)} shortcut="⌘J">
-      {workspaceOpen ? <PanelRightCloseIcon /> : <PanelRightOpenIcon />}
+    <TitleBarButton label="Toggle workspace" onClick={() => setWorkspaceOpen((v) => !v)} pressed={workspaceOpen} shortcut="⌘J">
+      <PanelRightIcon />
     </TitleBarButton>
   );
 }
@@ -106,7 +110,7 @@ export function ChatTitleBar({
           {awaiting > 0 && (
             <span className="flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-600 dark:text-amber-300">
               <span className="size-1.5 rounded-full bg-amber-500" />
-              {awaiting} needs approval
+              {awaiting} waiting for you
             </span>
           )}
         </div>

@@ -26,6 +26,7 @@ import type { CatalogResult } from "./desktop";
 import type { WorkspacePolicy } from "./workspace-policy";
 import type { HistorySession, SessionInput } from "./history-api";
 import type { StoredProject } from "./workspace-api";
+import type { AllowRule } from "./permissions";
 import { dropDraft } from "./drafts";
 
 export interface Thread {
@@ -67,6 +68,8 @@ export interface Project {
   pinned?: boolean;
   collapsed?: boolean;
   instructions?: string;
+  /** What runs without asking in every chat of the project (lib/permissions). */
+  alwaysAllowed?: AllowRule[];
   /** Names picked by the browser preview, which has no filesystem access. */
   folders?: ProjectFolder[];
   /** Folders and access rules. The desktop main process keeps the copy it enforces. */
@@ -191,7 +194,8 @@ interface StoreActions {
   newThread: (opts?: { temporary?: boolean; projectId?: string | null }) => string;
   /** Project changes resolve once saved; on desktop the main process confirms each one before it shows. */
   createProject: (name: string, access?: WorkspacePolicy, instructions?: string) => Promise<string>;
-  updateProject: (id: string, patch: Partial<Project>) => Promise<void>;
+  /** A patch, or a function of the project as the previous save left it (saves run one after another). */
+  updateProject: (id: string, patch: Partial<Project> | ((project: Project) => Partial<Project>)) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
   restoreProject: (project: Project, threadIds: string[]) => Promise<void>;
   setSidebarView: (patch: Partial<SidebarView>) => void;
@@ -298,7 +302,7 @@ function loadInitial(): StoreState {
     sidebarView: DEFAULT_VIEW,
     activeId: fallbackThread.id,
     // No model until a runtime lists one; the first chat model it lists is chosen (applyCatalog).
-    settings: { model: "", effort: "high", approval: "auto", webSearch: false },
+    settings: { model: "", effort: "high", defaultApproval: "ask", webSearch: false },
     statuses: {},
     sidebarOpen: true,
     workspaceOpen: true,
@@ -324,6 +328,9 @@ function loadInitial(): StoreState {
     // The desktop app keeps chats in its database; chats an older version left in localStorage are dropped.
     const threads = !window.enduranceHistory && saved.threads?.length ? saved.threads : base.threads;
     const fresh = blankThread();
+    // The one app-wide mode of earlier versions is dropped: new chats start in the default, each chat keeps its own.
+    const { approval: _appWide, ...savedSettings } = (saved.settings ?? {}) as Partial<ChatSettings> & { approval?: unknown };
+    void _appWide;
     return {
       ...base,
       ...saved,
@@ -336,7 +343,7 @@ function loadInitial(): StoreState {
       },
       threads: [fresh, ...threads.filter((t) => t.messages.length > 0)],
       activeId: fresh.id,
-      settings: { ...base.settings, ...saved.settings },
+      settings: { ...base.settings, ...savedSettings },
       statuses: {},
       paletteOpen: false,
       modelPickerOpen: false,
@@ -603,10 +610,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [commitProject]
   );
 
+  // Project saves run one after another, each from what the previous one saved, so an Always allow rule added while
+  // Project settings saves, or two rules in a row, are both kept.
+  const projectSaves = useRef<Promise<unknown>>(Promise.resolve());
   const updateProject = useCallback(
-    async (id: string, patch: Partial<Project>) => {
-      const current = projectsRef.current.find((p) => p.id === id);
-      if (current) await commitProject({ ...current, ...patch });
+    (id: string, patch: Partial<Project> | ((project: Project) => Partial<Project>)) => {
+      const save = projectSaves.current
+        .catch(() => undefined)
+        .then(async () => {
+          const current = projectsRef.current.find((p) => p.id === id);
+          if (!current) return;
+          const saved = await commitProject({ ...current, ...(typeof patch === "function" ? patch(current) : patch) });
+          projectsRef.current = projectsRef.current.map((p) => (p.id === saved.id ? saved : p));
+        });
+      projectSaves.current = save;
+      return save;
     },
     [commitProject]
   );
@@ -681,7 +699,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const chooseForChat = useCallback((id: string, patch: ChatChoice) => {
     setState((s) => {
       const settings = patch.model ? { ...s.settings, model: patch.model } : s.settings;
-      const threads = s.threads.map((t) => (t.id === id ? { ...t, choice: nextChoice(t.choice ?? { model: chatModelId(t, s.settings.model) }, patch) } : t));
+      // Only a model or effort pins the chat's model; the approval mode alone leaves it following its replies.
+      const start = (t: Thread) => t.choice ?? (patch.model || patch.effort ? { model: chatModelId(t, s.settings.model) } : {});
+      const threads = s.threads.map((t) => (t.id === id ? { ...t, choice: nextChoice(start(t), patch) } : t));
       return { ...s, settings, threads };
     });
   }, []);

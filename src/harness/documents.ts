@@ -16,6 +16,7 @@
 import { estimateText } from "../lib/token-estimate";
 import { inputLimit, type Budget } from "./budget";
 import type { AppUIMessage } from "../lib/types";
+import { appNote, builtPart, quoteTags } from "./app-note";
 
 /** Tokens per piece: an eighth of the window, at most this. */
 const MOST_PIECE = 4096;
@@ -211,9 +212,9 @@ function standIn(document: Document, budget: Budget) {
   const ordered = document.pieces.filter((piece) => shown.has(piece.n));
   const gaps = ordered.length < document.pieces.length;
   return [
-    `[${document.name} is too long to send whole (${document.lines} lines, about ${document.tokens} tokens), so it is document ${document.id} in ${document.pieces.length} pieces.${gaps ? " Read the pieces not shown here with read_document, and find where something is with search_document." : ""}]`,
-    `Pieces of ${document.id}:\n${list}`,
-    ...ordered.map((piece) => `--- ${document.id} piece #${piece.n} (lines ${piece.from}–${piece.to}) ---\n${piece.text}`),
+    appNote(`${document.name} is too long to send whole (${document.lines} lines, about ${document.tokens} tokens), so it is document ${document.id} in ${document.pieces.length} pieces.${gaps ? " Read the pieces not shown here with read_document, and find where something is with search_document." : ""}\nPieces of ${document.id}:\n${list}`),
+    // The pieces are the person's text, quoted here because the stand-in is kept as the app wrote it (app-note).
+    ...ordered.map((piece) => `--- ${document.id} piece #${piece.n} (lines ${piece.from}–${piece.to}) ---\n${quoteTags(piece.text)}`),
   ].join("\n\n");
 }
 
@@ -254,7 +255,7 @@ export function documentize(messages: AppUIMessage[], budget: Budget): { message
       const name = part.type === "file" ? (part.filename ?? "An attached file") : "The pasted text";
       const document: Document = { id: `D${documents.length + 1}`, name, pieces: split(text, size), lines: text.split("\n").length, tokens };
       documents.push(document);
-      return { type: "text" as const, text: standIn(document, budget) };
+      return builtPart({ type: "text" as const, text: standIn(document, budget) });
     });
     return changed ? { ...message, parts } : message;
   });

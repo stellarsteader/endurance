@@ -75,6 +75,7 @@ const OpenAIChatMessage = Schema.Union([
     content: Schema.NullOr(Schema.String),
     tool_calls: optionalArray(OpenAIChatAssistantToolCall),
     reasoning_content: Schema.optional(Schema.String),
+    reasoning: Schema.optional(Schema.String),
   }),
   Schema.Struct({ role: Schema.Literal("tool"), tool_call_id: Schema.String, content: Schema.String }),
 ]).pipe(Schema.toTaggedUnion("role"))
@@ -239,8 +240,12 @@ const lowerUserMessage = Effect.fn("OpenAIChat.lowerUserMessage")(function* (mes
   return { role: "user" as const, content }
 })
 
+// Endurance desktop adaptation: the thinking goes in each field the server may read (ModelCompatibility.reasoningFields).
+const BOTH_REASONING_FIELDS = ["reasoning_content", "reasoning"] as const
+
 const lowerAssistantMessage = Effect.fn("OpenAIChat.lowerAssistantMessage")(function* (
   message: OpenAIChatRequestMessage,
+  reasoningFields: ReadonlyArray<string> = BOTH_REASONING_FIELDS,
 ) {
   const content: TextPart[] = []
   const reasoning: ReasoningPart[] = []
@@ -261,14 +266,14 @@ const lowerAssistantMessage = Effect.fn("OpenAIChat.lowerAssistantMessage")(func
       continue
     }
   }
+  const thinking =
+    reasoning.length > 0 ? reasoning.map((part) => part.text).join("") : openAICompatibleReasoningContent(message.native?.openaiCompatible)
   return {
     role: "assistant" as const,
     content: content.length === 0 ? null : ProviderShared.joinText(content),
     tool_calls: toolCalls.length === 0 ? undefined : toolCalls,
-    reasoning_content:
-      reasoning.length > 0
-        ? reasoning.map((part) => part.text).join("")
-        : openAICompatibleReasoningContent(message.native?.openaiCompatible),
+    reasoning_content: reasoningFields.includes("reasoning_content") ? thinking : undefined,
+    reasoning: reasoningFields.includes("reasoning") ? thinking : undefined,
   }
 })
 
@@ -295,11 +300,42 @@ const lowerToolMessages = Effect.fn("OpenAIChat.lowerToolMessages")(function* (m
   return { messages, images }
 })
 
-const lowerMessage = Effect.fn("OpenAIChat.lowerMessage")(function* (message: OpenAIChatRequestMessage) {
+const lowerMessage = Effect.fn("OpenAIChat.lowerMessage")(function* (
+  message: OpenAIChatRequestMessage,
+  reasoningFields?: ReadonlyArray<string>,
+) {
   if (message.role === "user") return [yield* lowerUserMessage(message)]
-  if (message.role === "assistant") return [yield* lowerAssistantMessage(message)]
+  if (message.role === "assistant") return [yield* lowerAssistantMessage(message, reasoningFields)]
   return (yield* lowerToolMessages(message)).messages
 })
+
+// Endurance desktop adaptation: one user message per turn for strict chat templates.
+// Some Jinja chat templates (Gemma; older Mistral) refuse two user messages in a row, which the harness can
+// produce (a compaction summary before the latest user message; a system update or the images from tool
+// results before the next user message). Consecutive user messages are merged in order: two strings with a
+// blank line between them, otherwise the content parts concatenated. Tool and assistant messages are never
+// merged.
+type OpenAIChatUserMessageContent = Extract<OpenAIChatMessage, { role: "user" }>["content"]
+const userContentParts = (content: OpenAIChatUserMessageContent) =>
+  typeof content === "string" ? (content === "" ? [] : [{ type: "text" as const, text: content }]) : content
+const mergeUserContent = (
+  first: OpenAIChatUserMessageContent,
+  second: OpenAIChatUserMessageContent,
+): OpenAIChatUserMessageContent => {
+  if (typeof first === "string" && typeof second === "string")
+    return first === "" ? second : second === "" ? first : `${first}\n\n${second}`
+  return [...userContentParts(first), ...userContentParts(second)]
+}
+const mergeConsecutiveUserMessages = (messages: ReadonlyArray<OpenAIChatMessage>) => {
+  const merged: OpenAIChatMessage[] = []
+  for (const message of messages) {
+    const previous = merged.at(-1)
+    if (message.role === "user" && previous?.role === "user")
+      merged[merged.length - 1] = { role: "user", content: mergeUserContent(previous.content, message.content) }
+    else merged.push(message)
+  }
+  return merged
+}
 
 const lowerMessages = Effect.fn("OpenAIChat.lowerMessages")(function* (request: LLMRequest) {
   const system: OpenAIChatMessage[] =
@@ -335,10 +371,11 @@ const lowerMessages = Effect.fn("OpenAIChat.lowerMessages")(function* (request: 
       continue
     }
     flushImages()
-    messages.push(...(yield* lowerMessage(message)))
+    messages.push(...(yield* lowerMessage(message, request.model.compatibility?.reasoningFields)))
   }
   flushImages()
-  return messages
+  // Endurance desktop adaptation: see mergeConsecutiveUserMessages.
+  return mergeConsecutiveUserMessages(messages)
 })
 
 const lowerOptions = Effect.fn("OpenAIChat.lowerOptions")(function* (request: LLMRequest) {

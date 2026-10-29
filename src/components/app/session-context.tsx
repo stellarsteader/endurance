@@ -4,7 +4,7 @@ import type { UseChatHelpers } from "@ai-sdk/react";
 import type { FileUIPart } from "ai";
 import { createContext, useContext } from "react";
 import type { Thread, WorkspaceTab } from "@/lib/store";
-import type { AppUIMessage, ChatChoice, ChatSettings, Effort } from "@/lib/types";
+import type { AppUIMessage, Approval, ChatChoice, ChatSettings, Effort } from "@/lib/types";
 import type { ModelInfo } from "@/lib/models";
 
 export interface QueuedMessage {
@@ -40,7 +40,11 @@ export interface SessionValue {
   /** The model this chat runs on, and the effort it sends, fitted to the model. */
   model: ModelInfo;
   effort: Effort;
-  /** Picks a model or effort for this chat. */
+  /** This chat's approval mode: its own, or the default for new chats until its first message. */
+  approval: Approval;
+  /** Plan first is on for this chat: the agent proposes a plan before it changes anything. */
+  planFirst: boolean;
+  /** Picks a model, effort or approval mode for this chat. */
   choose: (patch: ChatChoice) => void;
 }
 

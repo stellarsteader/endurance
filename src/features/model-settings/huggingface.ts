@@ -138,6 +138,18 @@ export async function json(response: Response, signal: AbortSignal): Promise<unk
   return parseJSON(await body(response, signal));
 }
 
+const QUANTIZATION = /(?:^|[._/-])((?:IQ|Q|TQ)\d[\w]*|BF16|F16|F32)(?=[._/-]|$)/i;
+/**
+ * Files that ship beside the weights and do not run on their own: multi-token-prediction draft heads
+ * (mtp-gemma-4-12B-it-Q4_0.gguf, or a MTP/ folder), LoRA adapters, vocab-only files (ggml-vocab-llama.gguf), and
+ * the tokenizer, vocoder and decoder of a speech model (vocoder-LFM2.5-Audio-1.5B-Q8_0.gguf). The kind leads the
+ * file or folder name; inside a name it describes the weights instead (…-NEO-MAX-MTP-Q6_K.gguf is a whole model
+ * with its own MTP layers). The Hub does not resolve a quantization tag to these files either. Projectors
+ * (mmproj) stay: downloads pair them with the weights.
+ */
+const COMPANION =
+  /(?:^|\/)(?:ggml-)?(?:mtp|lora|adapter|vocab|tokenizer|detokenizer|vocoder|codec|audiodecoder|decoder)(?:[-_./]|$)/i;
+
 function parseModel(value: unknown): HFModel | undefined {
   const model = record(value);
   if (
@@ -158,16 +170,15 @@ function parseModel(value: unknown): HFModel | undefined {
       !validFilename(file.rfilename) ||
       !/\.gguf$/i.test(file.rfilename) ||
       // Importance-matrix data used for quantizing, not a model.
-      /imatrix/i.test(file.rfilename)
+      /imatrix/i.test(file.rfilename) ||
+      COMPANION.test(file.rfilename)
     )
       continue;
     const name = file.rfilename;
     if (seen.has(name)) continue;
     seen.add(name);
     // Retain the real filename: collapsed shard names are not selectable Ollama downloads.
-    const quantization = name
-      .match(/(?:^|[._/-])((?:IQ|Q|TQ)\d[\w]*|BF16|F16|F32)(?=[._/-]|$)/i)?.[1]
-      ?.toUpperCase();
+    const quantization = name.match(QUANTIZATION)?.[1]?.toUpperCase();
     const size = bytes(file.size) ?? bytes(record(file.lfs).size);
     files.push({
       name,
@@ -226,12 +237,14 @@ function searchTerm(query: string): { term: string; repository?: string } {
 }
 
 /**
- * Image input needs a vision projector next to the weights. The projector decides it: GGUF conversions often
- * inherit a text-generation pipeline tag from the base repository even when they ship one.
+ * Image or audio input needs a projector next to the weights. The projector decides it: GGUF conversions often
+ * inherit a text-generation pipeline tag from the base repository even when they ship one, and any-to-any is
+ * given to audio-only models too. An audio encoder is named for it (mmproj-audioencoder-…, mmproj-LFM3-Audio-…).
  */
 export function modalities(model: HFModel): Modality[] {
-  const vision = model.files.some((file) => file.projector);
-  return vision ? ["text", "image"] : ["text"];
+  const projectors = model.files.filter((file) => file.projector);
+  if (!projectors.length) return ["text"];
+  return projectors.every((file) => /audio/i.test(file.name)) ? ["text", "audio"] : ["text", "image"];
 }
 
 /** Files a runtime can install on their own. Shards and projectors are excluded. */
@@ -239,10 +252,33 @@ export function installable(model: HFModel) {
   return model.files.filter((file) => /\.gguf$/i.test(file.name) && !file.projector && !file.shard);
 }
 
-/** The projector Ollama adds to a vision download, so the shown size matches the transfer. */
-export function projectorBytes(model: HFModel) {
-  const projectors = model.files.filter((file) => file.projector && file.bytes !== undefined);
-  const preferred = projectors.find((file) => file.quantization === "F16") ?? projectors[0];
+/** Whether no other weights file shares this one's quantization, so a quantization tag selects exactly it. */
+const uniqueQuantization = (model: HFModel, file: HFFile) =>
+  Boolean(file.quantization) &&
+  model.files.filter((candidate) => !candidate.projector && candidate.quantization === file.quantization).length === 1;
+
+/** How a file reads in a list: its quantization, or its filename when several files share that quantization. */
+export const fileLabel = (model: HFModel, file: HFFile) =>
+  file.quantization && uniqueQuantization(model, file) ? file.quantization : file.name;
+
+/** The installable files this runtime can download, by the same rules downloadHuggingFace enforces. */
+export function downloadable(model: HFModel, runtime: string) {
+  return installable(model).filter((file) =>
+    runtime === "ollama" ? /^[\w.-]+\.gguf$/i.test(file.name) : uniqueQuantization(model, file),
+  );
+}
+
+/**
+ * The projector Ollama adds to a download, so the shown size matches the transfer. The Hub pairs the weights'
+ * own quantization, else Q8_0, else F16 (LFM3-VL Q6_K gets the Q8_0 projector; Gemma 4 Q4_K_XL the F16 one).
+ */
+export function projectorBytes(model: HFModel, file?: HFFile) {
+  const projectors = model.files.filter((candidate) => candidate.projector && candidate.bytes !== undefined);
+  const preferred =
+    projectors.find((candidate) => file?.quantization && candidate.quantization === file.quantization) ??
+    projectors.find((candidate) => candidate.quantization === "Q8_0") ??
+    projectors.find((candidate) => candidate.quantization === "F16") ??
+    projectors[0];
   return preferred?.bytes ?? 0;
 }
 
@@ -560,13 +596,7 @@ export async function downloadHuggingFace(
     );
   const headers = runtimeHeaders(input.connection);
   if (input.runtime === "llamacpp") {
-    if (
-      !file.quantization ||
-      model.files.filter(
-        (candidate) =>
-          !candidate.projector && candidate.quantization === file.quantization,
-      ).length !== 1
-    )
+    if (!uniqueQuantization(model, file))
       fail("llama.cpp cannot select this exact file by a unique quantization.");
     return downloadLlama(
       base,
@@ -578,13 +608,7 @@ export async function downloadHuggingFace(
     );
   }
   if (input.runtime === "lmstudio") {
-    if (
-      !file.quantization ||
-      model.files.filter(
-        (candidate) =>
-          !candidate.projector && candidate.quantization === file.quantization,
-      ).length !== 1
-    )
+    if (!uniqueQuantization(model, file))
       fail("LM Studio cannot select this exact file by a unique quantization.");
     try {
       const admitted = record(
@@ -655,14 +679,7 @@ export async function downloadHuggingFace(
   if (!/^[\w.-]+\.gguf$/i.test(file.name))
     fail("Ollama supports a single GGUF filename at the repository root.");
   // A unique quantization is the shorter tag Ollama lists afterwards; both select the same file.
-  const tag =
-    file.quantization &&
-    model.files.filter(
-      (candidate) =>
-        !candidate.projector && candidate.quantization === file.quantization,
-    ).length === 1
-      ? file.quantization
-      : file.name;
+  const tag = file.quantization && uniqueQuantization(model, file) ? file.quantization : file.name;
   const pull = (reference: string) =>
     pullOllamaModel(base, headers, input.connection.apiKey, `hf.co/${input.repository}:${reference}`, progress, signal, transport);
   if (tag === file.name) return pull(file.name);

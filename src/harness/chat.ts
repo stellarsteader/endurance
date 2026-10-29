@@ -7,12 +7,13 @@ import { OpenAICompatibleChat } from "./vendor/llm/protocols/openai-compatible-c
 import { Ollama } from "./vendor/schema/ollama";
 import { OllamaChat } from "./ollama-chat";
 import { Message, type ContentPart, type LLMEvent } from "./vendor/llm/schema";
+import type { ModelReasoningField } from "./vendor/llm/schema/options";
 import { endpoint } from "./runtime";
-import { compactHistory, summaryMessage } from "./compaction";
+import { carryCounts, compactHistory, summaryMessage } from "./compaction";
 import { skillCatalog, type SkillEntry } from "./skills";
 import { streamReply } from "./reply";
 import { thinkingRequest } from "./thinking";
-import { measure, modelProfile, recheckWindow, windowFromError, withLiveWindow } from "./profile/models";
+import { measure, modelProfile, nextReserve, recheckWindow, windowFromError, withLiveWindow } from "./profile/models";
 import { budgetFor, isEstimatedPrompt } from "./budget";
 import { hasLarge } from "./documents";
 import { hasAttachments, type Reader } from "./attachments";
@@ -20,18 +21,25 @@ import { attachmentId, documentFormat, imageFormat, SENT_IMAGE_FORMATS } from ".
 import { tuned } from "./sampling";
 import { describeFailure } from "./failure";
 import { runAs } from "./limit";
-import type { AppUIMessage, ChatSettings, Usage } from "../lib/types";
+import type { AppUIMessage, Approval, ChatSettings, Usage } from "../lib/types";
 import type { CompactResult } from "../lib/desktop";
 import { estimateText } from "../lib/token-estimate";
 import { fitInstructions } from "./instructions";
 import { breakdownOf } from "./breakdown";
+import type { CallInfo } from "./guarded";
 import type { ThinkingSwitchChoice } from "../lib/thinking-switch";
 import type { SamplingSets } from "../lib/sampling";
 import { runtimeName, type RuntimeConnection, type RuntimeId, type ServerLocation } from "../lib/models";
+import { noteChars, replyNote } from "./earlier";
+import { APP_NOTE_GUIDE, appNote, builtPart, isBuilt, quoteTags } from "./app-note";
 
-export interface ChatRequest extends ChatSettings {
+export interface ChatRequest extends Omit<ChatSettings, "defaultApproval"> {
   /** The chat's ID; a side chat has its own. Requests for the chat on screen go first (see ./limit). */
   id?: string;
+  /** This chat's approval mode. */
+  approval: Approval;
+  /** The person turned on Plan first for this chat: nothing changes before a plan is approved (./agent). */
+  planFirst?: boolean;
   messages: AppUIMessage[];
   runtime: RuntimeId;
   runtimeModelId: string;
@@ -76,6 +84,15 @@ export interface ChatRequest extends ChatSettings {
  * access at all ("as a local model I cannot…"), instead of saying what the person can change. Small models follow a
  * stated fact better than a condition, and the text is the same on every request, so the prompt stays cached.
  */
+/**
+ * Today's date on this computer, for every model: one trained long ago otherwise takes its training year for this
+ * one. The date alone, not the time, so the system prompt changes once a day rather than on every request.
+ */
+export function todayNote(now = new Date()) {
+  const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  return `Today is ${day}.`;
+}
+
 export function plainChatNote(body: Pick<ChatRequest, "projectName">) {
   const where = body.projectName ? `This chat is in the project "${body.projectName}", which has no folders.` : "This chat is not in a project.";
   return (
@@ -85,11 +102,73 @@ export function plainChatNote(body: Pick<ChatRequest, "projectName">) {
 }
 
 /** The text of the latest user message, which decides which skills are listed first. */
+/**
+ * Two calls of one reply, as when an answer that filled the window went on in another call. What the reply took adds
+ * up; the window is what the later call saw; and since neither call wrote the whole reply, its own count is unknown.
+ */
+/** The answer's usage with the summaries made for it added to its totals; the window stays the answer's. */
+const withSide = (answer: Usage, side: Usage): Usage => ({
+  ...answer,
+  input: answer.input + side.input,
+  output: answer.output + side.output,
+  reasoning: answer.reasoning + side.reasoning,
+  cached: answer.cached + side.cached,
+  calls: (answer.calls ?? 1) + (side.calls ?? 0),
+  ...(answer.decodeMs || side.decodeMs ? { decodeMs: (answer.decodeMs ?? 0) + (side.decodeMs ?? 0) } : {}),
+});
+
+function joinUsage(a: Usage, b: Usage): Usage {
+  const decodeMs = (a.decodeMs ?? 0) + (b.decodeMs ?? 0);
+  const { reply: _reply, first: _first, ...later } = b;
+  void _reply;
+  void _first;
+  return {
+    ...later,
+    // The first call's count stays the turn's own; the later call's prompt held the answer written so far.
+    ...(a.first !== undefined ? { first: a.first } : {}),
+    input: a.input + b.input,
+    output: a.output + b.output,
+    reasoning: a.reasoning + b.reasoning,
+    cached: a.cached + b.cached,
+    calls: (a.calls ?? 1) + (b.calls ?? 1),
+    ...(decodeMs ? { decodeMs } : {}),
+    ...(a.estimated || b.estimated ? { estimated: true } : {}),
+  };
+}
+
+/**
+ * A call made for a reply besides its answer, such as a summary: what it took adds to the reply's totals, while the
+ * window and the reply's own count stay those of the answer's calls.
+ */
+export function addSideUsage(total: Usage, usage: Extract<LLMEvent, { type: "finish" }>["usage"], call?: CallInfo) {
+  if (!usage) return;
+  total.input += usage.inputTokens ?? 0;
+  total.reasoning += usage.reasoningTokens ?? 0;
+  total.output += Math.max(0, (usage.outputTokens ?? 0) - (usage.reasoningTokens ?? 0));
+  total.cached += usage.cacheReadInputTokens ?? 0;
+  total.calls = (total.calls ?? 0) + 1;
+  if (call?.decodeMs) total.decodeMs = (total.decodeMs ?? 0) + call.decodeMs;
+}
+
 /** A single-call turn: its prompt and visible reply are what now fills the window. */
-export function turnUsage(usage: Extract<LLMEvent, { type: "finish" }>["usage"], window?: number): Usage {
+export function turnUsage(usage: Extract<LLMEvent, { type: "finish" }>["usage"], window?: number, call?: CallInfo): Usage {
   const output = Math.max(0, (usage?.outputTokens ?? 0) - (usage?.reasoningTokens ?? 0));
   const input = usage?.inputTokens ?? 0;
-  return { input, output, reasoning: usage?.reasoningTokens ?? 0, cached: usage?.cacheReadInputTokens ?? 0, context: input + output, calls: 1, ...(window ? { window } : {}), ...(isEstimatedPrompt(usage) ? { estimated: true } : {}) };
+  // The reply's own count, only when neither thinking nor tool arguments are folded into it (see Usage.reply).
+  const exact = !!call && usage?.outputTokens !== undefined && (usage.reasoningTokens !== undefined || !call.thought) && !call.tools;
+  return {
+    input,
+    output,
+    reasoning: usage?.reasoningTokens ?? 0,
+    cached: usage?.cacheReadInputTokens ?? 0,
+    context: input + output,
+    calls: 1,
+    ...(usage?.inputTokens !== undefined && !isEstimatedPrompt(usage) ? { first: usage.inputTokens } : {}),
+    ...(exact ? { reply: output } : {}),
+    ...(call?.decodeMs ? { decodeMs: call.decodeMs } : {}),
+    ...(window ? { window } : {}),
+    ...(isEstimatedPrompt(usage) ? { estimated: true } : {}),
+  };
 }
 
 export function requestText(messages: AppUIMessage[]) {
@@ -111,13 +190,36 @@ export function validate(body: ChatRequest) {
   if (!Array.isArray(body.messages) || typeof body.runtimeModelId !== "string" || !body.runtimeModelId) throw new Error("Choose a model from a connected local runtime.");
 }
 /** Ollama is called on its own /api/chat (see ./ollama-chat); every other runtime on its OpenAI-compatible API. */
+/**
+ * The thinking fields each OpenAI-compatible server is sent, by its address. Both go until a server refuses one as
+ * a field it does not know; that one is left out from then on (rejectedReasoningField).
+ */
+const reasoningFields = new Map<string, ModelReasoningField[]>();
+const BOTH_FIELDS: ModelReasoningField[] = ["reasoning_content", "reasoning"];
+
+/**
+ * Whether the error refuses one of the thinking fields as unknown, as strict servers word it ("Extra inputs are not
+ * permitted", "Unrecognized request argument", "unknown field"); if so, that field is not sent to this server again.
+ */
+export function rejectedReasoningField(body: ChatRequest, message: string) {
+  if (body.runtime === "ollama" || !/extra inputs|not permitted|unrecogni[sz]ed|unknown (?:field|argument|parameter)|unexpected (?:field|keyword|argument)|additional propert/i.test(message)) return false;
+  const field: ModelReasoningField | undefined = /reasoning_content/.test(message) ? "reasoning_content" : /\breasoning\b(?!_)/.test(message) ? "reasoning" : undefined;
+  const key = endpoint(body.connection);
+  const sent = reasoningFields.get(key) ?? BOTH_FIELDS;
+  if (!field || !sent.includes(field)) return false;
+  reasoningFields.set(key, sent.filter((item) => item !== field));
+  return true;
+}
+export const resetReasoningFields = () => reasoningFields.clear();
+
 export function modelFor(body: ChatRequest) {
   const base = endpoint(body.connection);
   const query = body.connection.query ? Object.fromEntries(new URLSearchParams(body.connection.query)) : undefined;
   const settings = { provider: body.runtime, auth: body.connection.apiKey ? Auth.bearer(body.connection.apiKey) : Auth.none, ...(body.connection.headers ? { headers: body.connection.headers } : {}) };
   const where = (baseURL: string) => ({ endpoint: { baseURL, ...(query ? { query } : {}) } });
   const route = body.runtime === "ollama" ? OllamaChat.route.with({ ...settings, ...where(Ollama.baseURL(base)) }) : OpenAICompatibleChat.route.with({ ...settings, ...where(base) });
-  return route.model({ id: body.runtimeModelId });
+  const fields = reasoningFields.get(base);
+  return route.model({ id: body.runtimeModelId, ...(fields ? { compatibility: { reasoningFields: fields } } : {}) });
 }
 /** Thinking turned off for this model: in Models settings, or with Off in the effort menu. */
 export const thinkingOff = (body: Pick<ChatRequest, "thinking" | "effort">) => body.thinking === false || body.effort === "none";
@@ -167,7 +269,7 @@ export function withoutNewImages(messages: AppUIMessage[]): AppUIMessage[] {
   return messages.map((message, index) => {
     if (index !== last) return message;
     const images = message.parts.filter(isImage);
-    const parts = message.parts.map((part): Part => (isImage(part) ? { type: "text", text: `[${imageLabel(images, part)} could not be processed, so its content is not included.]` } : part));
+    const parts = message.parts.map((part): Part => (isImage(part) ? builtPart({ type: "text", text: appNote(`${imageLabel(images, part)} could not be processed, so its content is not included.`) }) : part));
     return { ...message, parts };
   });
 }
@@ -184,14 +286,15 @@ export function imageNote(body: Pick<ChatRequest, "messages" | "visionSupported"
     : "You cannot see images: this model does not take image input, so images in this chat are not sent to you.";
 }
 
-export function toMessages(input: AppUIMessage[], options: { vision?: boolean } = {}) {
+export function toMessages(input: AppUIMessage[], options: { vision?: boolean; window?: number } = {}) {
   const last = input.findLastIndex((message) => message.role === "user");
   return input.map((message, index) => {
     const images = message.parts.filter(isImage);
     // The images that go as image input, in order, for the line that lists them.
     const sent: FilePart[] = [];
     const content: ContentPart[] = message.parts.flatMap((part): ContentPart[] => {
-      if (part.type === "text") return [{ type: "text", text: part.text }];
+      // What the person, a file or a page wrote cannot pass for the app's notes; what the app built keeps them.
+      if (part.type === "text") return [{ type: "text", text: isBuilt(part) ? part.text : quoteTags(part.text) }];
       // An attached document is read into text before the conversation is built (./attachments); here it is only checked.
       if (part.type === "file" && attachmentId(part.url)) {
         if (!documentFormat(part.mediaType, part.filename)) throw new Error(`${part.filename ?? "The attachment"} can't be read. Attach PDF, Word, Excel, CSV or text files.`);
@@ -202,30 +305,33 @@ export function toMessages(input: AppUIMessage[], options: { vision?: boolean } 
       if (part.mediaType.startsWith("image/")) {
         if (!part.url.startsWith("data:")) throw new Error(`${part.filename ?? "An image"} could not be read. Attach it again.`);
         if (options.vision !== false) {
-          if (!sendable(part.url)) return [{ type: "text", text: `[${imageLabel(images, part)} is in a format that can't be sent as image input, so its content is not included.]` }];
+          if (!sendable(part.url)) return [{ type: "text", text: appNote(`${imageLabel(images, part)} is in a format that can't be sent as image input, so its content is not included.`) }];
           sent.push(part);
           return [{ type: "media", mediaType: part.mediaType, data: part.url, filename: part.filename }];
         }
         // After switching to a text-only model, earlier images stay in the chat but are not sent.
         if (index === last) throw new Error("This model doesn't take image input. Switch to a model with image input to ask about images.");
-        return [{ type: "text", text: `[${imageLabel(images, part)} was shared here; this model cannot see it.]` }];
+        return [{ type: "text", text: appNote(`${imageLabel(images, part)} was shared here; this model cannot see it.`) }];
       }
       if (part.mediaType.startsWith("text/") && part.url.startsWith("data:")) {
         const match = /^data:[^,]*;base64,(.*)$/.exec(part.url);
         if (!match) throw new Error("Unsupported text attachment encoding.");
-        return [{ type: "text", text: `[${part.filename ?? "Attachment"}]\n${Buffer.from(match[1], "base64").toString("utf8")}` }];
+        return [{ type: "text", text: `${appNote(`Attached text file: ${part.filename ?? "Attachment"}`)}\n${quoteTags(Buffer.from(match[1], "base64").toString("utf8"))}` }];
       }
       // The composer refuses other formats; one already in the chat stands as a note, so the chat can go on.
-      return [{ type: "text", text: `[${part.filename ?? "A file"} (${part.mediaType || "unknown type"}) was attached; this format can't be read, so its content is not included.]` }];
+      return [{ type: "text", text: appNote(`${part.filename ?? "A file"} (${part.mediaType || "unknown type"}) was attached; this format can't be read, so its content is not included.`) }];
     });
     // Ollama sends a message's text as one string and its images apart, so what is sent is said once, up front, in
     // the order the images go. It speaks of image input, so it does not read like the note left for an image not sent.
     if (sent.length) {
       const names = sent.map((image) => image.filename ?? `image ${images.indexOf(image) + 1}`);
       const list = sent.length > 1 ? `${sent.length} images as image input, in order: ${names.join(", ")}` : `1 image as image input${sent[0].filename ? `: ${sent[0].filename}` : ""}`;
-      content.unshift({ type: "text", text: `[This message includes ${list}.]` });
+      content.unshift({ type: "text", text: appNote(`This message includes ${list}.`) });
     }
-    if (message.role === "user" && typeof message.metadata?.note === "string") content.push({ type: "text", text: `[Note from the app: ${message.metadata.note}]` });
+    if (message.role === "user" && typeof message.metadata?.note === "string") content.push({ type: "text", text: appNote(message.metadata.note) });
+    // A reply's tool calls are not sent; what they did goes first in the message after it (./earlier).
+    const previous = message.role === "user" && index > 0 && input[index - 1].role === "assistant" ? replyNote(input[index - 1], noteChars(options.window)) : undefined;
+    if (previous) content.unshift({ type: "text", text: previous });
     return Message.make({ id: message.id, role: message.role, content });
   });
 }
@@ -242,7 +348,10 @@ export async function chatResponse(request: Request) {
   }
   const started = Date.now();
   let finishReason: FinishReason = "stop";
-  let reportedUsage: Extract<LLMEvent, { type: "finish" }>['usage'];
+  // Every call of the reply: one usually, more when an answer that filled the window went on in another call.
+  const reported: { usage: NonNullable<Extract<LLMEvent, { type: "finish" }>["usage"]>; call?: CallInfo }[] = [];
+  // Summaries made for this reply, counted in what it took.
+  const side: Usage = { input: 0, output: 0, reasoning: 0, cached: 0 };
   const stream = createUIMessageStream<AppUIMessage>({
     originalMessages: raw.messages,
     onError: describeFailure,
@@ -265,15 +374,21 @@ export async function chatResponse(request: Request) {
       );
       const instructions = fitInstructions(body.projectInstructions, body.contextWindow);
       if (instructions.cut) writer.write({ type: "data-instructions", data: instructions.cut });
-      const system = [identity(body), instructions.text, plainChatNote(body), imageNote(body), skills].filter(Boolean).join("\n\n");
+      const system = [identity(body), instructions.text, plainChatNote(body), APP_NOTE_GUIDE, imageNote(body), skills, todayNote()].filter(Boolean).join("\n\n");
       // What the request sent, for the context meter's parts (./breakdown).
       let sent: { messages: Message[]; summary?: Message } = { messages: [] };
       const send = async (window: number | undefined) => {
         // Summarized only when the conversation and the room this model's answers take would not fit.
         const fitted = { ...body, contextWindow: window };
-        const { budget } = await measure(fitted, system, [], Boolean(body.reasoningSupported) && !thinkingOff(body));
-        const compact = async (extra: number) => compactHistory({ messages: body.messages, contextWindow: budget.window || window, system: estimateText(system) + extra, reserve: budget.reserve, model, layer, signal: request.signal, writer, thinking: await thinkingRequest(body, false), connection: body.connection, tune: (maxTokens) => tuned(body, false, { maxTokens }) });
-        const conversation = (history: Awaited<ReturnType<typeof compact>>) => [...(history.summary ? [summaryMessage(history.summary)] : []), ...toMessages(history.rest, { vision: body.visionSupported })];
+        const thinks = Boolean(body.reasoningSupported) && !thinkingOff(body);
+        const { budget, ratio } = await measure(fitted, system, [], thinks);
+        // A summary thinks as the chat does, within the output every call of this model keeps free.
+        const compact = async (extra: number) => compactHistory({ messages: body.messages, contextWindow: budget.window || window, system: estimateText(system) + extra, reserve: budget.reserve, model, layer, signal: request.signal, writer, thinking: await thinkingRequest(body, thinks), thinks, ratio, connection: body.connection, tune: (maxTokens) => tuned(body, thinks, { maxTokens }), onUsage: (usage, call) => addSideUsage(side, usage, call) });
+        const conversation = (history: Awaited<ReturnType<typeof compact>>) => {
+          const sent = [...(history.summary ? [summaryMessage(history.summary)] : []), ...toMessages(history.rest, { vision: body.visionSupported, window: budget.window || window })];
+          carryCounts(sent, body.messages);
+          return sent;
+        };
         const history = await compact(0);
         // Older turns are summarized at most once per request, so a summary is never summarized again.
         let compacted = Boolean(history.data);
@@ -281,7 +396,7 @@ export async function chatResponse(request: Request) {
         sent = { messages, summary: history.summary ? messages[0] : undefined };
         return streamReply({
           body: fitted, system, messages, writer, signal: request.signal,
-          onUsage: (usage) => { reportedUsage = usage; },
+          onUsage: (usage, call) => { if (usage) reported.push({ usage, call }); },
           rejectToolCalls: "Tool execution has not been connected to the local harness yet.",
           // An answer that filled the window needs room beside the conversation to go on.
           makeRoom: async (answer) => {
@@ -316,8 +431,12 @@ export async function chatResponse(request: Request) {
         writer.write({ type: "data-toast", data: { message: IMAGES_LEFT_OUT }, transient: true });
         finishReason = await attempt();
       }
-      const usage = reportedUsage ? turnUsage(reportedUsage, window) : undefined;
-      const breakdown = breakdownOf({ system: [identity(body), plainChatNote(body), imageNote(body)].filter(Boolean).join("\n\n"), instructions: instructions.text, skills }, 0, sent.messages, sent.messages.length, sent.summary);
+      const answered = reported.length ? reported.map((item) => turnUsage(item.usage, window, item.call)).reduce(joinUsage) : undefined;
+      const joined = answered && side.calls ? withSide(answered, side) : answered;
+      // Where the meter warns that older turns will be summarized, as the next request will plan it.
+      const reserve = joined ? await nextReserve(body, Boolean(body.reasoningSupported) && !thinkingOff(body)) : undefined;
+      const usage = joined && reserve ? { ...joined, reserve } : joined;
+      const breakdown = breakdownOf({ system: [identity(body), plainChatNote(body), APP_NOTE_GUIDE, imageNote(body), todayNote()].filter(Boolean).join("\n\n"), instructions: instructions.text, skills }, 0, sent.messages, sent.messages.length, sent.summary);
       if (usage?.output) breakdown.reply = usage.output;
       writer.write({ type: "finish", finishReason, messageMetadata: { model: body.model, durationMs: Date.now() - started, usage, breakdown } });
     }),
@@ -328,11 +447,16 @@ export async function chatResponse(request: Request) {
  * /compact: summarizes everything before the latest turn now, with the same summarizer automatic compaction
  * uses. The renderer stores the returned part on the conversation, so later requests reuse the summary.
  */
-export async function compactChat(raw: ChatRequest, signal: AbortSignal): Promise<CompactResult> {
+export async function compactChat(raw: ChatRequest & { focus?: string }, signal: AbortSignal): Promise<CompactResult> {
   validate(raw);
+  // What the person wrote after /compact for the summary to keep in particular (compaction.ts PROMPT).
+  const focus = typeof raw.focus === "string" && raw.focus.trim() ? raw.focus : undefined;
   const body = await withLiveWindow(raw);
-  const thinking = await thinkingRequest(body, false);
-  // Asked for in the chat, so it waits in line as that chat.
+  const thinks = Boolean(body.reasoningSupported) && !thinkingOff(body);
+  const thinking = await thinkingRequest(body, thinks);
+  const { budget, ratio } = await measure(body, identity(body), [], thinks);
+  // Asked for in the chat, so it waits in line as that chat. What it took is kept with the summary (CompactionData.usage).
+  const usage: Usage = { input: 0, output: 0, reasoning: 0, cached: 0 };
   const result = await runAs({ chat: raw.id, kind: "chat" }, () => compactHistory({
     messages: body.messages,
     contextWindow: body.contextWindow,
@@ -342,9 +466,14 @@ export async function compactChat(raw: ChatRequest, signal: AbortSignal): Promis
     layer,
     signal,
     force: true,
+    focus,
     thinking,
+    thinks,
+    ratio,
+    reserve: budget.reserve,
     connection: body.connection,
-    tune: (maxTokens) => tuned(body, false, { maxTokens }),
+    tune: (maxTokens) => tuned(body, thinks, { maxTokens }),
+    onUsage: (reported, call) => addSideUsage(usage, reported, call),
   }));
-  return result.data ? { data: result.data } : { skipped: result.skipped === "failed" ? "failed" : "short" };
+  return result.data ? { data: { ...result.data, ...(usage.calls ? { usage } : {}) } } : { skipped: result.skipped === "failed" ? "failed" : "short" };
 }

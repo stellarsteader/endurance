@@ -44,6 +44,7 @@ import {
   AtSignIcon,
   FileCodeIcon,
   GlobeIcon,
+  ListChecksIcon,
   ImageIcon,
   ListOrderedIcon,
   ChevronDownIcon,
@@ -81,6 +82,8 @@ interface MenuItem {
   label: string;
   hint: string;
   icon: typeof SlashIcon;
+  /** A command's optional argument, as the menu shows it after the name. */
+  argument?: string;
 }
 
 /** The slash commands. /compact needs a model from a connected runtime. */
@@ -89,21 +92,23 @@ function slashCommands(runtime: boolean): MenuItem[] {
     { id: "side", label: "side", hint: "Start a side chat for this conversation", icon: MessageCirclePlusIcon },
     { id: "model", label: "model", hint: "Choose a different model", icon: SparklesIcon },
     { id: "internet", label: "internet", hint: "Toggle internet access", icon: GlobeIcon },
-    ...(runtime ? [{ id: "compact", label: "compact", hint: "Summarize turns before the latest one to free context", icon: ListOrderedIcon }] : []),
+    ...(runtime ? [{ id: "compact", label: "compact", argument: "[what to keep]", hint: "Summarize turns before the latest one to free context", icon: ListOrderedIcon }] : []),
     { id: "clear", label: "clear", hint: "Clear this conversation", icon: Trash2Icon },
   ];
 }
 
-/** What the agent does in each mode (src/harness/agent.ts). Modes differ only in going online. */
-const APPROVALS: { id: Approval; label: string; hint: string; icon: typeof HandIcon; danger?: boolean }[] = [
-  { id: "ask", label: "Ask for approval", hint: "Ask before a reply first searches the web, opens a page or delegates web work", icon: HandIcon },
-  { id: "auto", label: "Approve for me", hint: "With Internet Access on, go online without asking", icon: ShieldCheckIcon },
-  { id: "full", label: "Full access", hint: "Currently the same as Approve for me: no prompts to go online", icon: ShieldAlertIcon, danger: true },
+/** What the agent asks first in each mode: going online (src/harness/agent.ts) and shell commands (needsApproval in src/harness/shell.ts). */
+export const APPROVALS: { id: Approval; label: string; hint: string; icon: typeof HandIcon; danger?: boolean }[] = [
+  { id: "ask", label: "Ask for approval", hint: "Asks before running a command or going online", icon: HandIcon },
+  { id: "auto", label: "Approve for me", hint: "Goes online and runs reads, tests and builds without asking. Asks before other commands.", icon: ShieldCheckIcon },
+  { id: "full", label: "Full access", hint: "Runs any command and goes online without asking", icon: ShieldAlertIcon, danger: true },
 ];
 
+/** This chat's approval mode, kept with the chat; Internet Access stays app-wide. */
 function PermissionsMenu() {
   const { settings, setSettings, threads, activeId, projects, openProjectSettings } = useStore();
-  const current = APPROVALS.find((a) => a.id === settings.approval) ?? APPROVALS[1];
+  const { approval, planFirst, choose } = useSession();
+  const current = APPROVALS.find((a) => a.id === approval) ?? APPROVALS[0];
   const project = projects.find((p) => p.id === threads.find((t) => t.id === activeId)?.projectId);
   return (
     <DropdownMenu>
@@ -116,7 +121,7 @@ function PermissionsMenu() {
               current.danger && "text-orange-500 hover:text-orange-500 dark:text-orange-400"
             )}
             size="icon-sm"
-            tooltip={`Permissions · ${current.label}`}
+            tooltip={`Permissions · ${current.label}${planFirst ? " · Plan first" : ""}`}
           >
             <current.icon className="size-4" />
             {settings.webSearch && (
@@ -127,8 +132,8 @@ function PermissionsMenu() {
       />
       <DropdownMenuContent align="start" className="w-[27rem] p-1" side="top" sideOffset={POPUP_GAP}>
         <DropdownMenuRadioGroup
-          onValueChange={(v) => setSettings({ approval: v as Approval })}
-          value={settings.approval}
+          onValueChange={(v) => choose({ approval: v as Approval })}
+          value={approval}
         >
           {APPROVALS.map((a) => (
             <DropdownMenuRadioItem
@@ -149,10 +154,23 @@ function PermissionsMenu() {
           ))}
         </DropdownMenuRadioGroup>
         <p className="px-2 pt-1 pb-1.5 text-[12px] leading-4 text-muted-foreground">
-          In every mode, files stay within this project&apos;s folders at each folder&apos;s access level, and file
-          changes are not asked about.
+          In every mode, files change only in Read &amp; write folders, and edits aren&apos;t asked about. Going online
+          needs Internet Access. Plans and questions always wait for you.
         </p>
         <DropdownMenuSeparator className="my-1" />
+        {/* For this chat: the agent proposes a plan and waits for it to be approved before it changes anything. */}
+        <DropdownMenuItem
+          className="gap-2 rounded-md py-1 pr-2 pl-2 text-[13px] font-normal leading-none"
+          closeOnClick={false}
+          onClick={() => choose({ planFirst: !planFirst })}
+        >
+          <ListChecksIcon className="size-4 text-muted-foreground" />
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span className="leading-4">Plan first</span>
+            <span className="text-[12px] leading-4 text-muted-foreground">Proposes a plan and waits for you before changing anything</span>
+          </span>
+          <Toggle checked={planFirst} />
+        </DropdownMenuItem>
         <DropdownMenuItem
           className="h-[26px] gap-2 rounded-md py-0 pr-2 pl-2 text-[13px] font-normal leading-none"
           closeOnClick={false}
@@ -417,18 +435,21 @@ function useTriggerMenu(value: string, runtime: boolean, isSide: boolean, projec
   const mention = MENTION.exec(value)?.[1] ?? null;
   const files = useMentionFiles(mention, isSide, projectId);
   return useMemo(() => {
-    const slash = /^\/(\w*)$/.exec(value);
+    // A command name being typed, or a command that takes an argument followed by it (/compact the API design).
+    const slash = /^\/(\w*)(?:\s+([\s\S]*))?$/.exec(value);
     if (slash) {
       const q = slash[1].toLowerCase();
-      return { kind: "slash" as const, query: q, items: slashCommands(runtime).filter((c) => c.id.startsWith(q)) };
+      const argument = slash[2];
+      const items = slashCommands(runtime).filter((c) => (argument === undefined ? c.id.startsWith(q) : c.id === q && c.argument));
+      if (argument === undefined || items.length > 0) return { kind: "slash" as const, query: q, argument: argument?.trim(), items };
     }
     if (mention !== null) return { kind: "mention" as const, query: mention, ...files };
     return null;
   }, [value, runtime, mention, files]);
 }
 
-/** `compact` runs /compact in the session. */
-export function Composer({ compact }: { compact?: () => void }) {
+/** `compact` runs /compact in the session, with what the summary should keep when the person wrote it after. */
+export function Composer({ compact }: { compact?: (focus?: string) => void }) {
   const { settings, setSettings, setModelPickerOpen, newThread, setSettingsSection } = useStore();
   const { chat, busy, pendingApproval, enqueue, send, thread, openSideChat, isSide, active, model } = useSession();
   const { value, setInput } = usePromptInputController().textInput;
@@ -466,7 +487,9 @@ export function Composer({ compact }: { compact?: () => void }) {
   }, [thread.id]);
 
   const runCommand = useCallback(
-    (id: string) => {
+    (id: string, argument?: string) => {
+      // Refused while a reply runs, so what was typed after /compact stays in the box.
+      if (id === "compact" && waiting) return void toast("Compact after the current reply finishes.");
       setInput("");
       switch (id) {
         case "model":
@@ -484,21 +507,21 @@ export function Composer({ compact }: { compact?: () => void }) {
           toast("Conversation cleared");
           break;
         case "compact":
-          compact?.();
+          compact?.(argument || undefined);
           break;
         case "new":
           newThread();
           break;
       }
     },
-    [chat, setInput, setSettings, setModelPickerOpen, settings.webSearch, newThread, openSideChat, compact]
+    [chat, setInput, setSettings, setModelPickerOpen, settings.webSearch, newThread, openSideChat, compact, waiting]
   );
 
   const pickMenuItem = useCallback(
     (item: MenuItem) => {
       if (!menu) return;
       if (menu.kind === "slash") {
-        runCommand(item.id);
+        runCommand(item.id, menu.argument);
       } else {
         setInput(value.replace(/@([^\s@]*)$/, `@${item.id} `));
       }
@@ -585,9 +608,13 @@ export function Composer({ compact }: { compact?: () => void }) {
         setMenuIndex((i) => (i - 1 + menu.items.length) % menu.items.length);
         return;
       }
-      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+      // Not while an IME is composing: Enter then ends the composition, as in what is typed after /compact.
+      if ((e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) || e.key === "Tab") {
         e.preventDefault();
-        pickMenuItem(menu.items[Math.min(menuIndex, menu.items.length - 1)]);
+        const item = menu.items[Math.min(menuIndex, menu.items.length - 1)];
+        // Tab on a command that takes an argument writes the command, so the argument can follow.
+        if (e.key === "Tab" && menu.kind === "slash" && item.argument && menu.argument === undefined) setInput(`/${item.id} `);
+        else pickMenuItem(item);
         return;
       }
     }
@@ -646,7 +673,10 @@ export function Composer({ compact }: { compact?: () => void }) {
               <item.icon className="size-4 shrink-0 text-muted-foreground" />
               {menu.kind === "slash" ? (
                 <>
-                  <span className="font-medium text-sky-600 dark:text-sky-400">{item.label}</span>
+                  <span className="shrink-0 font-medium text-sky-600 dark:text-sky-400">
+                    {item.label}
+                    {item.argument && <span className="ml-1.5 font-normal text-muted-foreground">{item.argument}</span>}
+                  </span>
                   <span className="truncate text-muted-foreground">{item.hint}</span>
                 </>
               ) : (

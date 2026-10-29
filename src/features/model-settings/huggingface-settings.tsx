@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { DOWNLOAD_RUNTIMES, type RuntimeId } from "../../lib/models";
 import { useStore } from "../../lib/store";
 import { cn } from "../../lib/utils";
-import { installable, modalities, projectorBytes } from "./huggingface";
+import { downloadable, fileLabel, installable, modalities, projectorBytes } from "./huggingface";
 import {
   ggufAlternative,
   ollamaDisplayName,
@@ -240,15 +240,15 @@ export function HuggingFaceSettings() {
 
   const download = (model: HFModel, file: HFFile) => {
     if (!destination) return;
-    const vision = modalities(model).includes("image") && destination.kind === "ollama";
     void startDownload({
       kind: "huggingface",
       input: { connectionId: destination.id, repository: model.id, filename: file.name },
       display: {
         key: model.id,
-        label: `${model.id.split("/").at(-1) ?? model.id} · ${file.quantization ?? file.name}`,
+        label: `${model.id.split("/").at(-1) ?? model.id} · ${fileLabel(model, file)}`,
         name: suggestedName(model.id),
-        expected: (file.bytes ?? 0) + (vision ? projectorBytes(model) : 0),
+        // Ollama pulls the projector with the weights.
+        expected: (file.bytes ?? 0) + (destination.kind === "ollama" ? projectorBytes(model, file) : 0),
       },
     });
   };
@@ -358,11 +358,15 @@ export function HuggingFaceSettings() {
         {!searching &&
           destination &&
           results.map((model) => {
-            const choices = installable(model);
-            const choice = choices.find((file) => file.name === files[model.id]) ?? choices.find((file) => file.quantization === "Q4_K_M") ?? choices[0];
-            const blocked = compatibility(model, destination.kind, choices);
+            const blocked = compatibility(model, destination.kind, installable(model));
+            // Only what this runtime can download is offered, so a choice never fails on its file layout.
+            const choices = downloadable(model, destination.kind);
+            // The file the Hub itself serves for hf.co/<repository> without a tag: Q4_K_M, else the first one.
+            const choice =
+              choices.find((file) => file.name === files[model.id]) ?? choices.find((file) => file.quantization === "Q4_K_M") ?? choices[0];
             const kinds = modalities(model);
-            const extra = kinds.includes("image") && destination.kind === "ollama" ? projectorBytes(model) : 0;
+            const shown = (file: HFFile) =>
+              file.bytes === undefined ? undefined : file.bytes + (destination.kind === "ollama" ? projectorBytes(model, file) : 0);
             const active = downloading(model.id);
             return (
               <div className="space-y-2.5 p-3" key={model.id}>
@@ -386,6 +390,7 @@ export function HuggingFaceSettings() {
                   {blocked ? <Pill tone="muted">{blocked}</Pill> : <Pill tone="ok">{destination.label}</Pill>}
                   <Pill>Text</Pill>
                   {kinds.includes("image") && <Pill>Image</Pill>}
+                  {kinds.includes("audio") && <Pill>Audio</Pill>}
                 </div>
                 {blocked && model.requested && results.length > 1 && (
                   <p className="text-[12px] leading-[1.35] text-muted-foreground">Install a GGUF conversion listed below.</p>
@@ -399,13 +404,13 @@ export function HuggingFaceSettings() {
                     >
                       <SelectTrigger aria-label={`File for ${model.id}`} className="h-7 min-w-0 flex-1 rounded-[6px] text-[12px]" size="sm">
                         <SelectValue>
-                          {choice.quantization ?? choice.name} · {gigabytes(choice.bytes === undefined ? undefined : choice.bytes + extra)}
+                          {fileLabel(model, choice)} · {gigabytes(shown(choice))}
                         </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
                         {choices.map((file) => (
                           <SelectItem key={file.name} value={file.name}>
-                            {file.quantization ?? file.name} · {gigabytes(file.bytes === undefined ? undefined : file.bytes + extra)}
+                            {fileLabel(model, file)} · {gigabytes(shown(file))}
                           </SelectItem>
                         ))}
                       </SelectContent>

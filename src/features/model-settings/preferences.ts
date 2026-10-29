@@ -2,7 +2,7 @@ import { MODEL_KINDS, type ModelCapability, type ModelInfo, type ModelKind } fro
 import type { Effort } from "../../lib/types";
 import type { ModelPreferences } from "./types";
 import { isThinkingSwitchChoice } from "../../lib/thinking-switch";
-import { addMeasurement, type MemoryMeasurement } from "../../lib/memory-estimate";
+import { addReport, type ReportedMemory } from "../../lib/memory-estimate";
 import { resolveWindow, type ResolvedWindow } from "../../lib/context-window";
 import { cleanSamplingSets } from "../../lib/sampling";
 
@@ -46,19 +46,21 @@ function read() {
   return cached;
 }
 const isKind = (value: unknown): value is ModelKind => MODEL_KINDS.some((kind) => kind.value === value);
-const MEASUREMENTS = 4;
-/** Valid measurements only, the last few kept. */
-function measurementsOf(value: unknown): MemoryMeasurement[] {
+const REPORTS = 4;
+/** Valid reports only, the last few kept. */
+function reportsOf(value: unknown): ReportedMemory[] {
   if (!Array.isArray(value)) return [];
   const whole = (item: unknown) => typeof item === "number" && Number.isSafeInteger(item) && item > 0;
   return value
-    .filter((item): item is MemoryMeasurement => Boolean(item) && typeof item === "object" && whole(item.context) && whole(item.bytes))
+    .filter((item): item is ReportedMemory => Boolean(item) && typeof item === "object" && whole(item.context) && whole(item.bytes))
     .map(({ context, bytes }) => ({ context, bytes }))
-    .slice(-MEASUREMENTS);
+    .slice(-REPORTS);
 }
 export function preferencesFor(connection: PreferenceTarget, modelId: string): ModelPreferences {
   const value = read()[connectionKey(connection, modelId)];
   if (!value || typeof value !== "object") return {};
+  // Saved as `measurements` before the rename; the next save writes it under the new name.
+  const reported = reportsOf(value.reportedMemory ?? (value as { measurements?: unknown }).measurements);
   return {
     ...(typeof value.displayName === "string" && value.displayName.trim()
       ? { displayName: value.displayName.trim().slice(0, 160) }
@@ -68,7 +70,7 @@ export function preferencesFor(connection: PreferenceTarget, modelId: string): M
     ...(value.vision === true ? { vision: true } : {}),
     ...(value.reasoning === true ? { reasoning: true } : {}),
     ...(isThinkingSwitchChoice(value.thinkingSwitch) && value.thinkingSwitch !== "auto" ? { thinkingSwitch: value.thinkingSwitch } : {}),
-    ...(measurementsOf(value.measurements).length ? { measurements: measurementsOf(value.measurements) } : {}),
+    ...(reported.length ? { reportedMemory: reported } : {}),
     ...(cleanSamplingSets(value.sampling) ? { sampling: cleanSamplingSets(value.sampling) } : {}),
     ...(isKind(value.kind) ? { kind: value.kind } : {}),
     ...(typeof value.contextLimit === "number" &&
@@ -90,8 +92,8 @@ export function savePreferences(connection: PreferenceTarget, modelId: string, v
   if (value.vision === true) clean.vision = true;
   if (value.reasoning === true) clean.reasoning = true;
   if (isThinkingSwitchChoice(value.thinkingSwitch) && value.thinkingSwitch !== "auto") clean.thinkingSwitch = value.thinkingSwitch;
-  const measurements = measurementsOf(value.measurements);
-  if (measurements.length) clean.measurements = measurements;
+  const reported = reportsOf(value.reportedMemory);
+  if (reported.length) clean.reportedMemory = reported;
   const sampling = cleanSamplingSets(value.sampling);
   if (sampling) clean.sampling = sampling;
   if (isKind(value.kind)) clean.kind = value.kind;
@@ -108,14 +110,15 @@ export function savePreferences(connection: PreferenceTarget, modelId: string, v
   notifyPreferences();
 }
 /**
- * Remembers the memory a loaded model used at its window, so later estimates for this model follow this machine.
+ * Remembers the memory the runtime reported a loaded model using at its window, so later estimates for this model
+ * follow this machine.
  * Writes only when the figure is new.
  */
-export function recordMeasurement(connection: PreferenceTarget, modelId: string, measurement: MemoryMeasurement) {
+export function recordReportedMemory(connection: PreferenceTarget, modelId: string, report: ReportedMemory) {
   const current = preferencesFor(connection, modelId);
-  const known = current.measurements ?? [];
-  if (known.some((item) => item.context === measurement.context && item.bytes === measurement.bytes)) return;
-  savePreferences(connection, modelId, { ...current, measurements: addMeasurement(known, measurement, MEASUREMENTS) });
+  const known = current.reportedMemory ?? [];
+  if (known.some((item) => item.context === report.context && item.bytes === report.bytes)) return;
+  savePreferences(connection, modelId, { ...current, reportedMemory: addReport(known, report, REPORTS) });
 }
 export function setPreferenceConnections(value: PreferenceTarget[]) {
   currentConnections = new Map(value.map((item) => [item.id, item]));

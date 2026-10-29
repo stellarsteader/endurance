@@ -3,7 +3,7 @@
 Type, color, radius, and density for Endurance.
 The values are CSS variables in `src/app/globals.css`.
 
-Reading text is 15px. That is the largest size. Page titles use it at medium weight.
+Reading text is 15px. That is the largest size, headings in replies included. Page titles use it at medium weight.
 
 ## Type
 
@@ -25,7 +25,7 @@ UI text is Geist. Code is Geist Mono.
 ## Weight
 
 Regular is 400. Medium is 500.
-Names and page titles are medium.
+Names, page titles, and headings in replies are medium.
 Session titles, menus, and body text are regular.
 
 ## Color
@@ -137,6 +137,25 @@ Code inside a card has a quiet background and no border.
 A repeated object is its own card.
 A test file stays inside its run, which is already the card.
 A to-do list stays on the workspace panel, which is already the surface.
+
+## Chat text
+
+Markdown in a reply keeps the text's size and line height. Space, not size, shows its structure.
+The same spacing holds in thoughts, the library, and summaries, at their own text size.
+
+| Between | Space |
+| --- | --- |
+| Blocks: paragraphs, lists, code, tables, quotes | 12px |
+| A paragraph and the list that follows it | 8px |
+| List items, and a nested list below its item | 4px |
+| A heading and what comes before it | 24px |
+| A heading and what follows it | 4px |
+| Text and a trace or tool card | 12px |
+
+A heading is at the text's size, medium. It sits closer to what follows than to what came before, so it reads as the start of a section.
+A reply that opens with a heading has no space above it.
+
+The values are the `.chat-text` rules in `src/app/globals.css`.
 
 ## Agents
 

@@ -8,17 +8,22 @@ function ScrollArea({
   className,
   children,
   scrollbarClassName,
+  viewportClassName,
   ...props
-}: ScrollAreaPrimitive.Root.Props & { scrollbarClassName?: string }) {
+}: ScrollAreaPrimitive.Root.Props & { scrollbarClassName?: string; viewportClassName?: string }) {
   return (
     <ScrollAreaPrimitive.Root
       data-slot="scroll-area"
       className={cn("relative", className)}
       {...props}
     >
+      {/* A max height goes on the viewport: the root then fits its content until the cap, and scrolls past it. */}
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
-        className="size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1"
+        className={cn(
+          "size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1",
+          viewportClassName
+        )}
       >
         {children}
       </ScrollAreaPrimitive.Viewport>

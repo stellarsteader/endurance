@@ -18,7 +18,7 @@ import type { FinishReason } from "ai";
 import { request as makeRequest } from "./vendor/llm/llm";
 import { Message, type LLMEvent } from "./vendor/llm/schema";
 import { layer, modelFor, type ChatRequest } from "./chat";
-import { guardedStream } from "./guarded";
+import { guardedStream, type CallInfo } from "./guarded";
 import type { Stopped } from "./loop-guard";
 import { outputPlan, withBody } from "./output";
 import { tuned } from "./sampling";
@@ -67,7 +67,7 @@ export interface ContinueOptions {
   answer: string;
   signal: AbortSignal;
   onText: (delta: string) => void;
-  onUsage?: (usage: FinishUsage) => void;
+  onUsage?: (usage: FinishUsage, call?: CallInfo) => void;
   /** Frees room for an answer of this many tokens: the conversation to send now, or undefined to keep it. */
   makeRoom: (answerTokens: number) => Promise<Message[] | undefined>;
 }
@@ -126,10 +126,10 @@ export async function continueAnswer(options: ContinueOptions): Promise<Continue
       signal,
       caps: output.caps,
       maxTokens: output.maxTokens,
-      onUsage: (reported) => {
+      onUsage: (reported, call) => {
         const { usage, trusted } = wholePrompt(reported, measured.estimated);
         if (trusted) learnRatio(body, measured.estimated, usage?.inputTokens);
-        options.onUsage?.(usage);
+        options.onUsage?.(usage, call);
       },
       // Thinking asked off but sent anyway is not shown: it would split the answer it continues.
       onPart: (part, text) => {

@@ -75,6 +75,32 @@ export const requestTokens = (system: string, history: readonly Message[], ratio
   Math.ceil((estimateText(system) + extra + history.reduce((total, message) => total + messageTokens(message), 0)) * ratio);
 
 /**
+ * Tokens the runtime counted for a message, where a call's count could be put on it: a reply's own output, and what
+ * a prompt grew by between two calls, shared over the messages added in between. The rest is estimated.
+ */
+export const measuredTokens = new WeakMap<Message, number>();
+
+/** The runtime's count of the last call: its prompt and output, and how many messages of the history that covers. */
+export interface Anchor {
+  tokens: number;
+  length: number;
+}
+
+/** A message's tokens: the runtime's count when known, otherwise the estimate scaled by how counts compared so far. */
+export const tokensOf = (message: Message, ratio = 1) => measuredTokens.get(message) ?? Math.ceil(messageTokens(message) * ratio);
+
+/**
+ * A request's tokens as best known, as Codex counts them: the last call's count plus what was added to the history
+ * since. Without that, each message's own count where known and an estimate for the rest and for the system prompt.
+ * `extra` is what the request sends besides the history, such as tool definitions, which a count already holds;
+ * `added` is room the request needs on top, such as an answer to continue, which no count holds yet.
+ */
+export function countedTokens(system: string, history: readonly Message[], ratio = 1, extra = 0, anchor?: Anchor, added = 0) {
+  if (anchor && anchor.length <= history.length) return anchor.tokens + history.slice(anchor.length).reduce((total, message) => total + tokensOf(message, ratio), 0) + added;
+  return Math.ceil((estimateText(system) + extra) * ratio) + history.reduce((total, message) => total + tokensOf(message, ratio), 0) + added;
+}
+
+/**
  * Moves the estimate toward what the runtime reported for a request (`estimated` is the unscaled estimate),
  * so later fitting follows its tokenizer rather than a guess. Bounded, so one odd report cannot undo the budget.
  */
@@ -91,9 +117,13 @@ const CLEAR_TO = 0.75;
 export const RESULT_PREFIX = "Result of ";
 const textOf = (message: Message) => message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
 const CLEARED = "Its result was cleared to make room.]";
+// What a cleared result keeps is which call it was, as claude-code and Hermes clear old tool output.
 const cleared = (label: string) => `[${label}. ${CLEARED}`;
 /** Whether a tool result is the line left by clearing, so the call may run again (./agent). */
 export const isCleared = (text: string) => text.endsWith(CLEARED);
+
+/** Results never cleared: the person's answers. */
+const KEPT: ReadonlySet<string> = new Set(["ask_user", "propose_plan"]);
 
 /**
  * Clears tool results of the run, oldest first, until the request fits well under its limit. Messages before
@@ -102,11 +132,11 @@ export const isCleared = (text: string) => text.endsWith(CLEARED);
  * that reads everything back fills the window and clears it once more. The call is not refused if it does run again.
  * Returns how many were cleared and whether the request fits now.
  */
-export function clearResults(system: string, history: readonly Message[], from: number, budget: Budget, ratio: number, labelOf: (id: string) => string, extra = 0) {
+export function clearResults(system: string, history: readonly Message[], from: number, budget: Budget, ratio: number, labelOf: (id: string) => string, extra = 0, anchor?: Anchor, added = 0) {
   const fitted = [...history];
   if (!budget.window) return { history: fitted, cleared: 0, fits: true };
   const limit = inputLimit(budget);
-  let size = requestTokens(system, fitted, ratio, extra);
+  let size = countedTokens(system, fitted, ratio, extra, anchor, added);
   if (size <= limit) return { history: fitted, cleared: 0, fits: true };
   const latest = fitted.findLastIndex((message) => message.role === "assistant");
   let count = 0;
@@ -115,13 +145,16 @@ export function clearResults(system: string, history: readonly Message[], from: 
     if (index > latest) continue;
     let replacement: Message | undefined;
     const part = message.content[0];
+    // The person's answer to a question or a plan stays: it is short, and cleared, the model asked again what was
+    // already answered (Nemotron e4b, in the app).
+    if (message.role === "tool" && part?.type === "tool-result" && KEPT.has(part.name)) continue;
     if (message.role === "tool" && part?.type === "tool-result" && !(part.result.type === "text" && isCleared(String(part.result.value))))
       replacement = Message.tool({ id: part.id, name: part.name, result: cleared(labelOf(part.id)), resultType: "text" });
     const text = message.role === "user" ? textOf(message) : "";
     if (text.startsWith(RESULT_PREFIX) && !isCleared(text))
       replacement = Message.user(cleared(text.slice(RESULT_PREFIX.length).split("\n")[0].replace(/:$/, "")));
     if (!replacement) continue;
-    size -= Math.ceil((messageTokens(message) - messageTokens(replacement)) * ratio);
+    size -= tokensOf(message, ratio) - tokensOf(replacement, ratio);
     fitted[index] = replacement;
     count++;
   }

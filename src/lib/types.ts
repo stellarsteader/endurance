@@ -9,17 +9,25 @@ export const isEffort = (value: unknown): value is Effort => EFFORTS.includes(va
 /**
  * What a chat keeps for itself. The model it runs on, once chosen for it; until then it follows the model of its
  * replies, else the one last chosen. The effort only when the person chose one in this chat, for this model;
- * otherwise the model's thinking default from Models settings applies.
+ * otherwise the model's thinking default from Models settings applies. The approval mode it was given when its first
+ * message went out, or the one the person chose in it since.
  */
 export interface ChatChoice {
   model?: string;
   effort?: Effort;
+  approval?: Approval;
+  /** The agent proposes a plan and waits for approval before it changes anything (harness/agent planGate). */
+  planFirst?: boolean;
 }
+
+export const APPROVAL_MODES: readonly Approval[] = ["ask", "auto", "full"];
+export const isApproval = (value: unknown): value is Approval => APPROVAL_MODES.includes(value as Approval);
 
 export interface ChatSettings {
   model: string;
   effort: Effort;
-  approval: Approval;
+  /** The approval mode a new chat starts with (Settings → Permissions); each chat then keeps its own. */
+  defaultApproval: Approval;
   webSearch: boolean;
 }
 
@@ -33,8 +41,26 @@ export interface Usage {
   context?: number;
   /** Model calls the turn made. */
   calls?: number;
+  /**
+   * The prompt the runtime counted for the turn's first answering call: the system prompt and the conversation up to
+   * the message answered. Later turns take each message's tokens from how this grew (lib/message-tokens). Unset when
+   * that count was the harness's estimate.
+   */
+  first?: number;
+  /**
+   * The visible reply of the turn's latest main call, as the runtime counted it. Unset when that count cannot be
+   * told apart from thinking: a runtime that reports no thinking count (Ollama) folds thinking into its output.
+   */
+  reply?: number;
+  /** Time the turn's calls spent writing, from each call's first piece to its finish: the base of generation speed. */
+  decodeMs?: number;
   /** Context window the turn ran with. */
   window?: number;
+  /**
+   * Output the next request on this model keeps free, as the harness planned it when the turn ended (harness/budget):
+   * older turns are summarized once a request passes `window − reserve`.
+   */
+  reserve?: number;
   /** The prompt count is the harness's estimate: the runtime's own count left out its cached part (harness/budget). */
   estimated?: boolean;
 }
@@ -47,7 +73,6 @@ export interface ChatMeta {
   createdAt?: number;
   durationMs?: number;
   usage?: Usage;
-  tps?: number;
   /** How the reply ended when it did not finish (lib/interrupted); the renderer writes it on Stop or an error. */
   interrupted?: "stopped" | "error";
   /** On a user message: a line for the model sent with it and not shown, such as what an interrupted reply left unknown. */
@@ -90,6 +115,8 @@ export interface CotStep {
   files?: string[];
   /** Why a step was blocked or failed, such as "No access". */
   note?: string;
+  /** The whole message when the note is only its start, opened from the note. */
+  detail?: string;
   /** The step ran but did not work, such as a file that does not exist. Not counted as done work. */
   failed?: boolean;
   /** For a reasoning row: what the model thought, streamed while it chose the next step. */
@@ -169,6 +196,8 @@ export interface CompactionData {
   limit: number;
   /** ID of the last message the summary covers. */
   upTo: string;
+  /** What a /compact took. A summary made during a reply counts in that reply's usage instead. */
+  usage?: Usage;
 }
 
 export type DataTypes = {

@@ -54,11 +54,26 @@ function InputGroupAddon({
       data-slot="input-group-addon"
       data-align={align}
       className={cn(inputGroupAddonVariants({ align }), className)}
-      onClick={(e) => {
-        if ((e.target as HTMLElement).closest("button")) {
+      // A press on the addon's empty space goes to the field (the textarea too, not only an input). Doing it on
+      // mousedown and keeping the default from running means a focused field never blurs and refocuses in between.
+      onMouseDown={(e) => {
+        if (
+          e.button !== 0 ||
+          (e.target as HTMLElement).closest(
+            "button, a, input, textarea, select, label, [role=button], [role=menuitem], [contenteditable=true]"
+          )
+        ) {
           return
         }
-        e.currentTarget.parentElement?.querySelector("input")?.focus()
+        const group = e.currentTarget.parentElement
+        const control =
+          group?.querySelector<HTMLElement>("[data-slot=input-group-control]") ??
+          group?.querySelector<HTMLElement>("input, textarea")
+        if (!control) {
+          return
+        }
+        e.preventDefault()
+        control.focus()
       }}
       {...props}
     />

@@ -13,11 +13,11 @@ import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { messageText } from "@/lib/derive";
-import { getModel } from "@/lib/models";
+import { formatTokens, getModel } from "@/lib/models";
 import { readFailure, type FailureKind } from "@/lib/failure";
 import { markNotChat } from "@/features/model-settings/preferences";
 import { useStore } from "@/lib/store";
-import type { AppUIMessage } from "@/lib/types";
+import type { AppUIMessage, Usage } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
   ActionBarPrimitive,
@@ -33,15 +33,9 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   CopyIcon,
-  DownloadIcon,
   PencilIcon,
-  RefreshCwIcon,
   RotateCcwIcon,
-  SquareIcon,
-  ThumbsDownIcon,
-  ThumbsUpIcon,
   TriangleAlertIcon,
-  Volume2Icon,
 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { Fragment, useEffect } from "react";
@@ -187,6 +181,39 @@ function EditComposer() {
   );
 }
 
+/** Speed needs this much writing time: a few tokens in a moment would read as an absurd rate. */
+const SPEED_MIN_MS = 500;
+
+/**
+ * What the reply took, from sending until it ended: every model call's prompt, cached part included, and every token
+ * it wrote, thinking included. Hovering shows the parts. The speed is writing only, after each prompt was read.
+ */
+function ReplyUsage({ usage }: { usage: Usage }) {
+  const written = usage.output + usage.reasoning;
+  const total = usage.input + written;
+  if (total <= 0) return null;
+  const speed = usage.decodeMs && usage.decodeMs >= SPEED_MIN_MS && written > 0 ? Math.round(written / (usage.decodeMs / 1000)) : undefined;
+  const calls = usage.calls ?? 1;
+  return (
+    <>
+      <Tooltip>
+        <TooltipTrigger render={<span className="tabular-nums" />}>· {formatTokens(total)} tokens</TooltipTrigger>
+        <TooltipContent>
+          <div className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5 tabular-nums">
+            <span>Prompt</span>
+            <span className="text-right">{formatTokens(usage.input)}{usage.cached > 0 ? ` · ${formatTokens(usage.cached)} from cache` : ""}</span>
+            <span>Generated</span>
+            <span className="text-right">{formatTokens(written)}{usage.reasoning > 0 ? ` · ${formatTokens(usage.reasoning)} thinking` : ""}</span>
+            <span>Model calls</span>
+            <span className="text-right">{calls}</span>
+          </div>
+        </TooltipContent>
+      </Tooltip>
+      {speed !== undefined && <span className="tabular-nums">· {speed} tok/s</span>}
+    </>
+  );
+}
+
 function AssistantFooter({ message, isLast }: { message: AppUIMessage; isLast: boolean }) {
   const { send } = useSession();
   const meta = message.metadata;
@@ -206,40 +233,6 @@ function AssistantFooter({ message, isLast }: { message: AppUIMessage; isLast: b
           hideWhenRunning
         >
           <CopyAction />
-          <ActionBarPrimitive.Reload asChild>
-            <IconButton tooltip="Regenerate">
-              <RefreshCwIcon />
-            </IconButton>
-          </ActionBarPrimitive.Reload>
-          <ActionBarPrimitive.FeedbackPositive asChild>
-            <IconButton className="text-muted-foreground data-submitted:text-emerald-500" tooltip="Good response">
-              <ThumbsUpIcon />
-            </IconButton>
-          </ActionBarPrimitive.FeedbackPositive>
-          <ActionBarPrimitive.FeedbackNegative asChild>
-            <IconButton className="text-muted-foreground data-submitted:text-red-500" tooltip="Bad response">
-              <ThumbsDownIcon />
-            </IconButton>
-          </ActionBarPrimitive.FeedbackNegative>
-          <AuiIf condition={(s) => s.message.speech == null}>
-            <ActionBarPrimitive.Speak asChild>
-              <IconButton tooltip="Read aloud">
-                <Volume2Icon />
-              </IconButton>
-            </ActionBarPrimitive.Speak>
-          </AuiIf>
-          <AuiIf condition={(s) => s.message.speech != null}>
-            <ActionBarPrimitive.StopSpeaking asChild>
-              <IconButton tooltip="Stop reading">
-                <SquareIcon />
-              </IconButton>
-            </ActionBarPrimitive.StopSpeaking>
-          </AuiIf>
-          <ActionBarPrimitive.ExportMarkdown asChild>
-            <IconButton tooltip="Export as Markdown">
-              <DownloadIcon />
-            </IconButton>
-          </ActionBarPrimitive.ExportMarkdown>
           <BranchPicker />
         </ActionBarPrimitive.Root>
         {model && (
@@ -253,7 +246,7 @@ function AssistantFooter({ message, isLast }: { message: AppUIMessage; isLast: b
             <ModelSelectorLogo className="size-3" provider={model.provider} />
             {model.name}
             {meta?.durationMs && <span>· {(meta.durationMs / 1000).toFixed(1)}s</span>}
-            {meta?.tps && <span>· {meta.tps} tok/s</span>}
+            {meta?.usage && <ReplyUsage usage={meta.usage} />}
           </span>
         )}
       </div>

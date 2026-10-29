@@ -15,7 +15,8 @@ import { percent, useReopenHistory, useVaultProgress } from "./vault-gate";
 
 const tokens = (value: number) => (value >= 1000 ? `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}K` : String(value));
 const seconds = (ms?: number) => (ms === undefined ? undefined : ms >= 10_000 ? `${Math.round(ms / 1000)}s` : `${(ms / 1000).toFixed(1)}s`);
-function when(time: number) {
+/** A time as the lists show it: the time of day for today, else the date and time. */
+export function when(time: number) {
   const date = new Date(time);
   const today = new Date().toDateString() === date.toDateString();
   return today

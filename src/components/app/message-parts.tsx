@@ -8,7 +8,7 @@ import {
   ChainOfThoughtSearchResults,
   ChainOfThoughtStep,
 } from "@/components/ai-elements/chain-of-thought";
-import { CodeBlock } from "@/components/ai-elements/code-block";
+import { DiffView } from "./diff-view";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { usePacedText } from "@/components/ai-elements/paced-text";
 import { Reasoning, ReasoningContent, ReasoningTrigger, useReasoning } from "@/components/ai-elements/reasoning";
@@ -17,6 +17,7 @@ import { Sources, SourcesContent, SourcesTrigger } from "@/components/ai-element
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { commandKeys } from "@/lib/command-key";
 import { isToolPart, toolNameOf, type ToolPartLike } from "@/lib/derive";
 import { approvalExpired, continuesInPlace, interruptionNote, interruptionOf, outcomeUnknown, type InterruptCause, type Interruption } from "@/lib/interrupted";
 import type {
@@ -40,6 +41,7 @@ import {
   BookOpenIcon,
   BrainIcon,
   CheckCircle2Icon,
+  CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   CircleAlertIcon,
@@ -317,6 +319,48 @@ function ReasoningStepRow({ step, state, now }: { step: CotStep; state: TraceSta
   );
 }
 
+/**
+ * Under a finished reply, how far its approved plan got when steps are still open, so an answer that reads as done
+ * cannot hide that it is not: a model ended a reply "review complete" with its plan at 0 of 3.
+ */
+function PlanLeftOpen({ parts }: { parts: AppUIMessage["parts"] }) {
+  const approved = parts.some((part) => part.type === "dynamic-tool" && part.toolName === "plan_approval" && "approval" in part && part.approval?.approved);
+  const todos = parts.findLast((part) => part.type === "data-todos");
+  // A reply waiting on a card (a question, a command) has not ended; its plan is still being worked.
+  const waiting = parts.some((part) => part.type === "dynamic-tool" && part.state === "approval-requested");
+  if (!approved || waiting || todos?.type !== "data-todos") return null;
+  const items = todos.data.items;
+  const done = items.filter((item) => item.status === "completed").length;
+  if (done === items.length) return null;
+  return (
+    <div className="not-prose flex items-center gap-2 px-1 text-[12px] leading-[1.35] text-amber-600 dark:text-amber-400">
+      <ListChecksIcon className="size-3.5 shrink-0" />
+      <span>
+        Plan not finished: {done} of {items.length} steps done
+      </span>
+    </div>
+  );
+}
+
+/** A failure's first line that opens to the whole message, such as an edit's closest lines, which the model saw too. */
+function StepDetail({ note, detail }: { note: string; detail: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="pt-0.5 text-[12px] leading-[1.35]">
+      <button
+        aria-expanded={open}
+        className="flex max-w-full items-baseline gap-1 text-left text-amber-500/90 outline-none hover:text-amber-500 focus-visible:text-amber-500"
+        onClick={() => setOpen((value) => !value)}
+        type="button"
+      >
+        <span className="min-w-0">{note}</span>
+        <ChevronRightIcon className={cn("size-3 shrink-0 translate-y-[1px]", open && "rotate-90")} />
+      </button>
+      {open && <pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-[6px] bg-muted/40 p-2 font-mono text-[11.5px] text-muted-foreground">{detail}</pre>}
+    </div>
+  );
+}
+
 function AgentStepRow({ step, state, now }: { step: CotStep; state: TraceState; now: number }) {
   if (step.kind === "reasoning") return <ReasoningStepRow now={now} state={state} step={step} />;
   const Icon = cotIcons[step.kind];
@@ -332,11 +376,11 @@ function AgentStepRow({ step, state, now }: { step: CotStep; state: TraceState; 
           </span>
           <Duration ms={stepElapsed(step, live ? now : undefined)} />
         </div>
-        {(step.note || cutOff) && (
+        {(step.note || cutOff) && (step.detail ? <StepDetail detail={step.detail} note={step.note ?? ""} /> : (
           <div className={cn("pt-0.5 text-[12px] leading-[1.35]", cutOff ? "text-muted-foreground" : "text-amber-500/90")}>
             {step.note ?? "Stopped"}
           </div>
-        )}
+        ))}
         {step.files && step.files.length > 0 && <FileChips files={step.files} />}
       </div>
     </li>
@@ -354,6 +398,8 @@ function AgentStepRow({ step, state, now }: { step: CotStep; state: TraceState; 
 interface TraceCards {
   draw: (toolCallId: string) => ReactNode | undefined;
   asking: (toolCallId: string) => boolean;
+  /** A plan, a question or a file change: it stays in sight when the trace folds, as it did drawn after the trace. */
+  decision: (toolCallId: string) => boolean;
 }
 
 function AgentSteps({ data, streaming, asking, cards }: { data: CotData; streaming: boolean; asking: boolean; cards?: TraceCards }) {
@@ -406,8 +452,9 @@ function AgentSteps({ data, streaming, asking, cards }: { data: CotData; streami
           })}
         </ol>
       ) : (
-        // Folded, a command waiting for approval still shows its card, so it can be answered.
-        data.steps.map((step) => (step.card && cards?.asking(step.card) ? <div key={step.id}>{cards.draw(step.card)}</div> : null))
+        // Folded, a command waiting for approval still shows its card, so it can be answered; a plan or a question
+        // shows what was decided, and a file change its diff.
+        data.steps.map((step) => (step.card && (cards?.asking(step.card) || cards?.decision(step.card)) ? <div key={step.id}>{cards.draw(step.card)}</div> : null))
       )}
     </div>
   );
@@ -636,9 +683,12 @@ function testLabel(data: TestRunOutput) {
 function EditFileRow({ part }: { part: ToolPartLike }) {
   const { openWorkspace, workspaceTab, focus } = useSession();
   const workspaceOpen = useStore().workspaceOpen;
-  const [open, setOpen] = useState(false);
   const input = part.input as { path?: string } | undefined;
   const out = part.state === "output-available" ? (part.output as EditFileOutput) : undefined;
+  // A small change shows its diff in place, as Claude Code and Codex show edits; a large one waits to be opened.
+  const [toggled, setToggled] = useState<boolean | null>(null);
+  const open = toggled ?? (out ? !out.deleted && out.additions + out.deletions <= SMALL_CHANGE : false);
+  const setOpen = (next: (value: boolean) => boolean) => setToggled(next(open));
   const path = out?.path ?? input?.path ?? "file";
   const showing = Boolean(out && workspaceOpen && workspaceTab === "changes" && focus === out.path);
 
@@ -679,12 +729,15 @@ function EditFileRow({ part }: { part: ToolPartLike }) {
       </div>
       {open && out && (
         <div className="pb-2 pl-[27px]">
-          <CodeBlock className="max-h-80 overflow-auto rounded-[6px] border-0 bg-muted/40" code={out.patch} language="diff" />
+          <DiffView className="max-h-80" patch={out.patch} />
         </div>
       )}
     </div>
   );
 }
+
+/** Changed lines up to which an edit's diff shows open. */
+const SMALL_CHANGE = 20;
 
 /**
  * A plan the agent proposed, waiting for the person: Approve carries it out in the same reply, Revise sends what to
@@ -771,8 +824,11 @@ function PlanApproval({ part, expired }: { part: ToolPartLike; expired: boolean 
  */
 function QuestionCard({ part, expired }: { part: ToolPartLike; expired: boolean }) {
   const { chat } = useSession();
-  const asked = (part.input ?? {}) as { question?: string; options?: string[] };
+  const asked = (part.input ?? {}) as { question?: string; options?: string[]; multiple?: boolean };
   const options = asked.options ?? [];
+  // Several options may be ticked together, as Claude Code's multiSelect; the person's own words are added to them.
+  const multiple = Boolean(asked.multiple);
+  const [picked, setPicked] = useState<string[]>([]);
   const approval = "approval" in part ? part.approval : undefined;
   const asking = part.state === "approval-requested" && !expired;
   const [choice, setChoice] = useState<string>();
@@ -781,7 +837,7 @@ function QuestionCard({ part, expired }: { part: ToolPartLike; expired: boolean 
   const given = output?.answer ?? (approval?.approved ? approval.reason : undefined);
   // Skipped with its button, or passed over by a message sent instead (chat-session declines it).
   const skipped = output?.skipped || approval?.approved === false || part.state === "output-denied";
-  const answer = own.trim() || choice;
+  const answer = multiple ? [...options.filter((option) => picked.includes(option)), own.trim()].filter(Boolean).join("\n") : own.trim() || choice;
   const respond = (approved: boolean, reason?: string) => approval && chat.addToolApprovalResponse({ id: approval.id, approved, reason });
   const status = given ? undefined : skipped ? "Skipped" : expired && part.state === "approval-requested" ? "Expired" : undefined;
   return (
@@ -794,10 +850,14 @@ function QuestionCard({ part, expired }: { part: ToolPartLike; expired: boolean 
       </div>
       <div className="text-[15px] leading-[1.45]">{asked.question}</div>
       {given ? (
-        <div className="mt-3 flex items-start gap-2 text-[13px] leading-[1.4]">
-          <CheckCircle2Icon className="mt-[2px] size-3.5 shrink-0 text-emerald-500" />
-          <span>{given}</span>
-        </div>
+        <ul className="mt-3 flex flex-col gap-1 text-[13px] leading-[1.4]">
+          {given.split("\n").map((line, index) => (
+            <li className="flex items-start gap-2" key={index}>
+              <CheckCircle2Icon className="mt-[2px] size-3.5 shrink-0 text-emerald-500" />
+              <span>{line}</span>
+            </li>
+          ))}
+        </ul>
       ) : asking ? (
         <form
           className="mt-3 flex flex-col gap-2"
@@ -806,7 +866,33 @@ function QuestionCard({ part, expired }: { part: ToolPartLike; expired: boolean 
             if (answer) respond(true, answer);
           }}
         >
-          {options.length > 0 && (
+          {options.length > 0 && multiple && (
+            <div className="flex flex-col gap-1" role="group" aria-label="Answers, choose any">
+              {options.map((option) => {
+                const on = picked.includes(option);
+                return (
+                  <button
+                    aria-checked={on}
+                    className={cn(
+                      "flex min-h-8 items-center gap-2 rounded-[6px] border px-2.5 py-1.5 text-left text-[13px] leading-[1.4] outline-none transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring",
+                      on && "border-foreground/40 bg-muted/60"
+                    )}
+                    key={option}
+                    onClick={() => setPicked((list) => (on ? list.filter((item) => item !== option) : [...list, option]))}
+                    role="checkbox"
+                    type="button"
+                  >
+                    <span className={cn("flex size-3 shrink-0 items-center justify-center rounded-[3px] border", on && "border-foreground bg-foreground text-background")}>
+                      {on && <CheckIcon className="size-2.5" strokeWidth={3} />}
+                    </span>
+                    {option}
+                  </button>
+                );
+              })}
+              <span className="px-0.5 text-[11.5px] text-muted-foreground">Choose any that apply.</span>
+            </div>
+          )}
+          {options.length > 0 && !multiple && (
             <div className="flex flex-col gap-1" role="radiogroup" aria-label="Answers">
               {options.map((option) => (
                 <button
@@ -839,7 +925,7 @@ function QuestionCard({ part, expired }: { part: ToolPartLike; expired: boolean 
                 respond(true, answer);
               }
             }}
-            placeholder={options.length ? "Or answer in your own words…" : "Your answer…"}
+            placeholder={options.length ? (multiple ? "Add anything in your own words…" : "Or answer in your own words…") : "Your answer…"}
             value={own}
           />
           <div className="flex justify-end gap-2">
@@ -877,6 +963,22 @@ function filesOf(output: unknown) {
   return Array.isArray(files) ? files.filter((file): file is string => typeof file === "string") : null;
 }
 
+/** The Always allow label for a command: the keys it remembers, each cut short when long, in full on hover. */
+function AllowKeys({ keys, scope }: { keys: string[]; scope: string }) {
+  const key = (value: string) => (
+    <span className="max-w-[12rem] truncate font-mono" key={value}>
+      {value}
+    </span>
+  );
+  return (
+    <span className="flex min-w-0 items-center gap-1" title={keys.join(", ")}>
+      Always allow
+      {keys.length === 1 ? key(keys[0]) : keys.length === 2 ? <>{key(keys[0])} and {key(keys[1])}</> : `these ${keys.length} commands`}
+      {` in this ${scope}`}
+    </span>
+  );
+}
+
 /** A command's state beside it: asking, running, or how it ended when that was not plainly. */
 function shellDetail(ran: ShellOutput | undefined, asking: boolean, unknown: boolean, expired: boolean) {
   if (asking) return "Needs approval";
@@ -895,7 +997,7 @@ function shellDetail(ran: ShellOutput | undefined, asking: boolean, unknown: boo
  * nobody can answer any more shows as expired (`expired`).
  */
 function ToolBlock({ part, live, expired }: { part: ToolPartLike; live: boolean; expired: boolean }) {
-  const { chat, model } = useSession();
+  const { chat, model, thread } = useSession();
   // A chat whose model runs elsewhere already leaves this computer; the card must not promise otherwise.
   const location = model.location;
   const elsewhere = location === "network" || location === "remote";
@@ -920,11 +1022,16 @@ function ToolBlock({ part, live, expired }: { part: ToolPartLike; live: boolean;
   const running = live && (part.state === "input-streaming" || part.state === "input-available" || (name === "run_shell" && part.state === "output-available" && Boolean((part.output as ShellOutput | undefined)?.running)));
 
   const web = name === "web_access";
+  // What Always allow remembers for a command (lib/command-key): each part's key. A command with none always asks.
+  const keys = name === "run_shell" ? commandKeys((part.input as { command?: string } | undefined)?.command ?? "") : [];
+  // Always allow holds for the chat's project, or for the chat alone when it has none, such as a side chat.
+  const scope = thread.projectId ? "project" : "chat";
   const respond = (approved: boolean, always = false) => {
     if (!approval) return;
-    // "always" lets the local agent skip asking again in this chat.
+    // "always" lets the local agent skip asking again: in every chat of the project, or in this chat when it has none
+    // (lib/permissions, recorded when the answer is sent).
     chat.addToolApprovalResponse({ id: approval.id, approved, reason: approved ? (always ? "always" : undefined) : "User denied" });
-    if (always) toast.success(web ? "Web access allowed for this chat" : "Commands allowed for this chat");
+    if (always) toast.success(`${web ? "Web access" : keys.length === 1 ? keys[0] : "Commands"} allowed in this ${scope}`);
   };
 
   if (name === "run_tests" && part.state === "output-available") {
@@ -1006,9 +1113,11 @@ function ToolBlock({ part, live, expired }: { part: ToolPartLike; live: boolean;
             <Button className="h-7 rounded-[6px] text-[12px]" onClick={() => respond(false)} size="sm" variant="outline">
               Deny
             </Button>
-            <Button className="h-7 rounded-[6px] text-[12px]" onClick={() => respond(true, true)} size="sm" variant="outline">
-              {web ? "Always allow" : "Always allow in this chat"}
-            </Button>
+            {(web || keys.length > 0) && (
+              <Button className="h-7 max-w-full min-w-0 rounded-[6px] text-[12px]" onClick={() => respond(true, true)} size="sm" variant="outline">
+                {web ? `Always allow in this ${scope}` : <AllowKeys keys={keys} scope={scope} />}
+              </Button>
+            )}
             <Button className="h-7 rounded-[6px] text-[12px]" onClick={() => respond(true)} size="sm">
               {web ? "Allow once" : "Run once"}
             </Button>
@@ -1100,15 +1209,33 @@ export function MessageParts({ message, streaming }: { message: AppUIMessage; st
   const notice = interruption && <InterruptedNotice interruption={interruption} message={message} />;
   // Commands the agent's trace names by their tool call: each card is drawn at its step instead of after the trace.
   const toolParts = new Map(parts.filter(isToolPart).map((part) => [part.toolCallId, part] as const));
+  // A to-do list or a summary made during the run is named in the trace as "<part type>:<part id>" (agent placeData).
+  const dataPart = (card: string) => {
+    const at = card.indexOf(":");
+    const type = card.slice(0, at);
+    const id = card.slice(at + 1);
+    return type === "data-todos" || type === "data-compaction" ? parts.findLast((part) => part.type === type && part.id === id) : undefined;
+  };
   const placed = new Set(
-    parts.flatMap((part) => (part.type === "data-cot" && part.data.agent ? part.data.steps.flatMap((step) => (step.card && toolParts.has(step.card) ? [step.card] : [])) : []))
+    parts.flatMap((part) =>
+      part.type === "data-cot" && part.data.agent ? part.data.steps.flatMap((step) => (step.card && (toolParts.has(step.card) || dataPart(step.card)) ? [step.card] : [])) : []
+    )
   );
+  const placedData = (part: Part) => (part.type === "data-todos" || part.type === "data-compaction") && placed.has(`${part.type}:${part.id}`);
   const traceCards: TraceCards = {
     draw: (id) => {
+      const data = dataPart(id);
+      if (data?.type === "data-todos") return <TodosTask data={data.data} />;
+      if (data?.type === "data-compaction") return <CompactionRow data={data.data} />;
       const part = toolParts.get(id);
       return part ? <ToolBlock expired={expired} live={streaming} part={part} /> : undefined;
     },
     asking: (id) => toolParts.get(id)?.state === "approval-requested" && !expired,
+    decision: (id) => {
+      if (dataPart(id)) return true;
+      const part = toolParts.get(id);
+      return part?.type === "dynamic-tool" && (part.toolName === "plan_approval" || part.toolName === "user_question" || part.toolName === "edit_file");
+    },
   };
   // The trace waits only while an approval in this reply can still be answered.
   const asking = !expired && [...toolParts.values()].some((part) => part.state === "approval-requested");
@@ -1145,7 +1272,7 @@ export function MessageParts({ message, streaming }: { message: AppUIMessage; st
               <CotBlock data={part.data} key={key} streaming={streaming} />
             );
           case "data-compaction":
-            return <CompactionRow data={part.data} key={key} />;
+            return placedData(part) ? null : <CompactionRow data={part.data} key={key} />;
           case "data-loop":
             return <LoopNotice data={part.data} key={key} messageId={message.id} />;
           case "data-fit":
@@ -1162,7 +1289,7 @@ export function MessageParts({ message, streaming }: { message: AppUIMessage; st
           case "data-subagent":
             return i === firstAgent ? <SubagentTrace agents={subagents} key={key} /> : null;
           case "data-todos":
-            return i === lastTodos ? <TodosTask data={part.data} key={key} /> : null;
+            return i === lastTodos && !placedData(part) ? <TodosTask data={part.data} key={key} /> : null;
           case "data-commit":
             return <CommitCard data={part.data} key={key} />;
           case "file":
@@ -1183,6 +1310,7 @@ export function MessageParts({ message, streaming }: { message: AppUIMessage; st
             return isToolPart(part) && !placed.has(part.toolCallId) ? <ToolBlock expired={expired} key={key} live={streaming} part={part} /> : null;
         }
       })}
+      {!streaming && <PlanLeftOpen parts={parts} />}
       {statusLine}
       {notice}
       {viewer}

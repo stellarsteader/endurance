@@ -1,6 +1,6 @@
 import type { ModelKind, RuntimeConnection, RuntimeId } from "../../lib/models";
 import type { ThinkingSwitchChoice } from "../../lib/thinking-switch";
-import type { MemoryFacts, MemoryMeasurement } from "../../lib/memory-estimate";
+import type { MemoryFacts, ReportedMemory } from "../../lib/memory-estimate";
 import type { Sampling, SamplingField, SamplingSets } from "../../lib/sampling";
 import type { ManagedModel, ManagerDownload, ManagerInfo, ManagerPlan } from "./manager-client";
 
@@ -31,7 +31,7 @@ export interface ModelPreferences {
   /** For a runtime that switches thinking through the chat template: which variable it reads. Unset is automatic. */
   thinkingSwitch?: ThinkingSwitchChoice;
   /** Memory the runtime reported for this model loaded here, by window; the last few, newest last. */
-  measurements?: MemoryMeasurement[];
+  reportedMemory?: ReportedMemory[];
   /** Sampling the person set, sent with every request for the model (lib/sampling). Unset is the model's own. */
   sampling?: SamplingSets;
   /**
@@ -76,7 +76,7 @@ export interface HFFile {
   shard?: boolean;
   projector?: boolean;
 }
-export type Modality = "text" | "image";
+export type Modality = "text" | "image" | "audio";
 export interface HFModel {
   id: string;
   downloads?: number;

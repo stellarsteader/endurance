@@ -167,8 +167,15 @@ export namespace ModelDefaults {
 export const ModelToolSchemaCompatibility = Schema.Literals(["gemini", "moonshot"])
 export type ModelToolSchemaCompatibility = Schema.Schema.Type<typeof ModelToolSchemaCompatibility>
 
+// Endurance desktop adaptation: OpenAI-compatible servers read an earlier assistant message's thinking from
+// `reasoning_content` (llama.cpp, SGLang) or `reasoning` (Ollama's /v1, newer vLLM); both are sent unless the server
+// refused one (see harness/chat reasoningFields).
+export const ModelReasoningField = Schema.Literals(["reasoning_content", "reasoning"])
+export type ModelReasoningField = Schema.Schema.Type<typeof ModelReasoningField>
+
 export class ModelCompatibility extends Schema.Class<ModelCompatibility>("LLM.ModelCompatibility")({
   toolSchema: Schema.optional(ModelToolSchemaCompatibility),
+  reasoningFields: Schema.optional(Schema.Array(ModelReasoningField)),
 }) {}
 
 export namespace ModelCompatibility {

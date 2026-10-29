@@ -35,16 +35,25 @@ const SPECS: Record<ToolName, { description: string; parameters: object }> = {
     description: "Find files by name or contents. Use a few words or code names; files with more of them come first.",
     parameters: object({ query: text("A few words or code names the files would contain."), path: text("Optional folder or file to search in.") }, ["query"]),
   },
+  // Several paths in one call: a model that thinks plans its reads one by one and asks for one file per response even
+  // when told to batch, but fills a list when the tool takes one (Gemma4 and Nemotron e4b, 8 of 8 with thinking on).
   read: {
-    description: "Read a file. A long file comes in parts; the result says which line to continue from.",
-    parameters: object({ path: text(PATH), line: { type: "integer", minimum: 1, description: "Line to start from, to continue a long file." } }, ["path"]),
+    description: "Read files. List every file you need in paths at once. A long file comes in parts; the result says which line to continue from.",
+    parameters: object(
+      {
+        paths: { type: "array", minItems: 1, items: text(PATH), description: "The files to read." },
+        line: { type: "integer", minimum: 1, description: "Line to start from, to continue one long file." },
+        start: { type: "integer", minimum: 0, description: "Character in that line to start from, to continue one very long line." },
+      },
+      ["paths"]
+    ),
   },
   edit: {
     description: "Change part of an existing file. find is exact text from the file, unique in it. Read the file first.",
     parameters: object({ path: text(PATH), find: text("Exact lines copied from the file."), replace: text("The text that replaces them.") }, ["path", "find", "replace"]),
   },
   write: {
-    description: "Create a file, or replace one with its full content. Use edit for small changes. Only Read & write folders allow writing.",
+    description: "Create a file, or replace one with its full content. Missing folders on its path are created. Replacing a file needs a read of all of it first in this request. Use edit for small changes. Only Read & write folders allow writing.",
     parameters: object({ path: text(PATH), content: text("The full content of the file.") }, ["path", "content"]),
   },
   delete: {
@@ -100,11 +109,12 @@ const SPECS: Record<ToolName, { description: string; parameters: object }> = {
   },
   ask_user: {
     description:
-      "Ask the user one question and wait for the answer, only when you cannot go on without their choice and it is not in the conversation or the files. Not to confirm, not for what you can find out yourself, never the same question twice. Give 2 to 4 short options, the one you recommend first; the user may also answer in their own words.",
+      "Ask the user one question and wait for the answer, only when you cannot go on without their choice and it is not in the conversation or the files. Not to confirm, not for what you can find out yourself, never the same question twice. Give 2 to 4 short options, the one you recommend first, and set multiple when several of them may be chosen together; the user may also answer in their own words.",
     parameters: object(
       {
         question: text("The question, in the user's language."),
         options: { type: "array", minItems: 2, maxItems: MOST_OPTIONS, items: { type: "string" }, description: "Short answers to choose from." },
+        multiple: { type: "boolean", description: "True when the user may choose several options." },
       },
       ["question"]
     ),
@@ -115,14 +125,22 @@ const SPECS: Record<ToolName, { description: string; parameters: object }> = {
   },
   delegate: {
     description:
-      "Give bounded, independent work to subagents. Each subagent works without this conversation and reports back one result. Give each a complete task: the goal, what to look at, what to return. Subagents cannot delegate.",
+      "Give bounded, independent work to subagents. Each works in a fresh conversation and reports back once, so its reading and searching stay out of yours. Use it to look through many files or several separate areas (one assignment each), or for independent changes to separate files. Not for one file, a quick lookup, or the step you need before anything else. Subagents know nothing of this conversation: give each a complete task with the goal, the files or folders, what is already known and what to return. Kind explore only reads and searches; kind work may also change the files in its paths, so give work assignments different files. Check what a subagent reports before relying on it. Subagents cannot delegate or ask the user.",
     parameters: object(
       {
         assignments: {
           type: "array",
           minItems: 1,
           maxItems: MAX_SUBAGENTS,
-          items: object({ name: text("A short name."), task: text("The complete task."), paths: { type: "array", items: { type: "string" } } }, ["name", "task"]),
+          items: object(
+            {
+              name: text("A short name."),
+              kind: { type: "string", enum: ["explore", "work"], description: "explore: reads and searches only. work: may also change files in its paths." },
+              task: text("The complete task."),
+              paths: { type: "array", items: { type: "string" }, description: "The files or folders it covers; a work assignment changes only these." },
+            },
+            ["name", "kind", "task"]
+          ),
         },
       },
       ["assignments"]
@@ -161,11 +179,12 @@ export interface Args {
   title?: string;
   summary?: string;
   steps?: { title?: string; detail?: string }[];
-  assignments?: { name?: string; task?: string; paths?: string[] }[];
+  assignments?: { name?: string; kind?: "explore" | "work"; task?: string; paths?: string[] }[];
   command?: string;
   cwd?: string;
   question?: string;
   options?: string[];
+  multiple?: boolean;
 }
 
 const string = (value: unknown) => (typeof value === "string" ? value : typeof value === "number" ? String(value) : undefined);
@@ -188,7 +207,9 @@ export function argsOf(input: unknown): Args {
   const assignments = Array.isArray(raw.assignments)
     ? raw.assignments.map((item) => {
         const entry = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
-        return { name: string(entry.name), task: string(entry.task), paths: Array.isArray(entry.paths) ? entry.paths.flatMap((path) => string(path) ?? []) : undefined };
+        // An assignment without a kind may change files, as every assignment could before kinds.
+        const kind = string(entry.kind)?.trim().toLowerCase() === "explore" ? ("explore" as const) : ("work" as const);
+        return { name: string(entry.name), kind, task: string(entry.task), paths: Array.isArray(entry.paths) ? entry.paths.flatMap((path) => string(path) ?? []) : undefined };
       })
     : undefined;
   // Small models give one path as a string, or as `path`.
@@ -230,6 +251,7 @@ export function argsOf(input: unknown): Args {
     options: (Array.isArray(raw.options) ? raw.options : typeof raw.options === "string" ? raw.options.split(/\n|;/) : [])
       .map((item) => string(item && typeof item === "object" ? (item as Record<string, unknown>).label : item)?.trim())
       .filter((item): item is string => Boolean(item)),
+    multiple: raw.multiple === true || raw.multiple === "true",
   };
 }
 
@@ -237,7 +259,8 @@ export function argsOf(input: unknown): Args {
 export function missing(name: ToolName, args: Args) {
   if ((name === "search" || name === "web_search" || name === "search_document") && !args.query) return "Not run: a search needs a query.";
   if (name === "fetch" && !/^https?:\/\//.test(args.url ?? "")) return "Not run: fetch needs a full https:// address.";
-  if ((name === "read" || name === "edit" || name === "write") && !args.path) return `Not run: ${name} needs a path.`;
+  if (name === "read" && !args.paths?.length) return "Not run: read needs the paths of the files to read.";
+  if ((name === "edit" || name === "write") && !args.path) return `Not run: ${name} needs a path.`;
   if (name === "delete" && !args.paths?.length) return "Not run: delete needs the paths of the files to delete.";
   if (name === "edit" && (!args.find || args.replace === undefined)) return "Not run: edit needs the exact text to find and its replacement.";
   if (name === "write" && args.content === undefined) return "Not run: write needs the full file content.";
@@ -249,6 +272,50 @@ export function missing(name: ToolName, args: Args) {
     return `Not run: a to-do list is for work with ${LEAST_TODOS} or more separate changes. Do this work directly.`;
   if (name === "delegate" && !(args.assignments ?? []).some((item) => item.task?.trim())) return "Not run: delegate needs at least one assignment with a task.";
   return undefined;
+}
+
+type TodoArg = { title?: string; status?: string };
+const titleWords = (title: string) => new Set(title.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+const wordShare = (one: string, other: string) => {
+  const mine = titleWords(one);
+  const theirs = titleWords(other);
+  return [...mine].filter((word) => theirs.has(word)).length / Math.max(mine.size, theirs.size, 1);
+};
+const sameStep = (one: string, other: string) => one.trim().toLowerCase() === other.trim().toLowerCase() || wordShare(one, other) >= 0.5;
+
+/**
+ * A to-do update shorter than the list kept is taken as the steps it changes, the rest standing as they were.
+ * Nemotron e4b on Ollama sent only the step it had just finished; taken as a whole list it was refused for being too
+ * short, and no step was marked done until the end. Each step is found by its title, else by most shared words, else
+ * it is the step in progress (or the first open one), which a progress report is most likely about. With no step left
+ * in progress, the next open one starts, so the reminder can name it.
+ */
+export function mergeTodos(current: readonly TodoArg[] | undefined, update: readonly TodoArg[]): TodoArg[] {
+  const named = update.filter((item) => item.title);
+  if (!current?.length || named.length >= current.length) return [...update];
+  // An update naming none of the kept steps is a new list for new work, not progress on the old one.
+  if (!named.some((item) => current.some((other) => sameStep(other.title ?? "", item.title!)))) return [...update];
+  const merged = current.map((item) => ({ ...item }));
+  const open = () => merged.findIndex((item) => item.status === "in_progress");
+  for (const item of named) {
+    const mine = titleWords(item.title!);
+    let best = merged.findIndex((other) => other.title?.trim().toLowerCase() === item.title!.trim().toLowerCase());
+    if (best < 0) {
+      let score = 0.5;
+      merged.forEach((other, index) => {
+        const theirs = titleWords(other.title ?? "");
+        const shared = [...mine].filter((word) => theirs.has(word)).length / Math.max(mine.size, theirs.size, 1);
+        if (shared >= score) [best, score] = [index, shared + Number.EPSILON];
+      });
+    }
+    if (best < 0) best = open() >= 0 ? open() : merged.findIndex((other) => other.status !== "completed");
+    if (best >= 0) merged[best].status = item.status;
+  }
+  if (open() < 0) {
+    const next = merged.find((item) => item.status !== "completed");
+    if (next) next.status = "in_progress";
+  }
+  return merged;
 }
 
 /** How each tool appears in the trace: its kind, and its verb while running, once done, and when it failed. */
@@ -284,9 +351,10 @@ function subject(name: ToolName, args: Args) {
   if (name === "read_document") return `${args.document || "the document"}${args.piece && args.piece > 1 ? ` from piece ${args.piece}` : ""}`;
   if (name === "search_document") return `${args.document || "the documents"} for “${args.query ?? ""}”`;
   if (name === "delegate") return (args.assignments ?? []).map((item) => item.name).filter(Boolean).join(", ") || "subagents";
-  if (name === "delete") return args.paths?.length ? `${args.paths[0]}${args.paths.length > 1 ? ` and ${args.paths.length - 1} more` : ""}` : "files";
-  const lines = name === "read" && args.line && args.line > 1 ? ` from line ${args.line}` : "";
-  return `${args.path || "a file"}${lines}`;
+  if (name === "delete" || (name === "read" && (args.paths?.length ?? 0) > 1))
+    return args.paths?.length ? `${args.paths[0]}${args.paths.length > 1 ? ` and ${args.paths.length - 1} more` : ""}` : "files";
+  if (name === "read") return `${args.paths?.[0] || args.path || "a file"}${args.line && args.line > 1 ? ` from line ${args.line}` : ""}`;
+  return args.path || "a file";
 }
 
 export const kindOf = (name: ToolName) => TRACE[name].kind;
@@ -321,12 +389,18 @@ export interface Outcome {
   text: string;
   /** Short names for the trace. */
   files?: string[];
+  /** Files a read showed from first line to last, which a write may then replace (agent seesFile). */
+  whole?: string[];
   /** Folder access refused it. */
   blocked?: string;
   level?: "none" | "read" | "secret";
   /** Files it changed or deleted. */
   wrote?: string | string[];
+  /** The change's own card (its diff), drawn at the call's step in the trace instead of a second row after it. */
+  card?: string;
   failed?: string;
+  /** The whole failure when `failed` is only its start, such as an edit's hint with the closest lines. */
+  detail?: string;
 }
 
 function cite(context: ToolContext, url: string, title: string) {
@@ -345,6 +419,12 @@ const domain = (url: string) => {
     return url;
   }
 };
+
+/**
+ * Text from the internet, marked as such: a page may hold instructions written for a model, and these tags are what
+ * the system prompt tells the model never to follow (agent webNote). A closing tag inside the text cannot end it early.
+ */
+const fromWeb = (text: string) => `<web_content>\n${text.replace(/<\/?web_content>/gi, "")}\n</web_content>`;
 
 /** Whole blocks that fit in `size` characters, then what was left out. */
 function fitBlocks(blocks: string[], size: number, rest: (left: number) => string) {
@@ -369,7 +449,8 @@ export const planOf = (args: Args) => ({
 /** A question as its card shows it: one question and up to MOST_OPTIONS distinct answers, a lone option dropped. */
 export function questionOf(args: Args) {
   const options = [...new Set((args.options ?? []).map((option) => option.slice(0, 160)))].slice(0, MOST_OPTIONS);
-  return { question: (args.question ?? "").slice(0, 600), options: options.length >= 2 ? options : [] };
+  const offered = options.length >= 2 ? options : [];
+  return { question: (args.question ?? "").slice(0, 600), options: offered, ...(args.multiple && offered.length ? { multiple: true } : {}) };
 }
 
 const mb = (bytes: number) => `${Math.ceil(bytes / 1024 / 1024)} MB`;
@@ -421,11 +502,11 @@ export async function runTool(context: ToolContext, name: ToolName, args: Args):
   try {
     if (name === "web_search") {
       const found = await webSearch(args.query ?? "", context.signal);
-      if (!found.results.length) return { text: found.raw ? found.raw.slice(0, size) : `No web results for "${found.query}".` };
+      if (!found.results.length) return { text: found.raw ? fromWeb(found.raw.slice(0, size)) : `No web results for "${found.query}".` };
       // Each result gets an equal share, so the last ones are not dropped for the first one's length.
       const share = Math.max(200, Math.floor(size / found.results.length) - 120);
       const lines = found.results.map((result) => `[${cite(context, result.url, result.title)}] ${result.title} — ${result.url}\n${result.text.length > share ? `${result.text.slice(0, share)}…` : result.text}`);
-      return { text: lines.join("\n\n"), files: [...new Set(found.results.map((result) => domain(result.url)))].slice(0, 6) };
+      return { text: fromWeb(lines.join("\n\n")), files: [...new Set(found.results.map((result) => domain(result.url)))].slice(0, 6) };
     }
     if (name === "fetch") {
       const page = await webFetch(args.url ?? "", context.signal);
@@ -435,7 +516,7 @@ export async function runTool(context: ToolContext, name: ToolName, args: Args):
       const end = Math.min(page.text.length, start + Math.max(200, size - header.length - 120));
       const where = start > 0 || end < page.text.length ? ` (characters ${start}–${end} of ${page.text.length})` : "";
       const more = end < page.text.length ? `\n… more below. Fetch again with start ${end} to continue.` : "";
-      return { text: `${header}${where}\n${page.text.slice(start, end)}${more}`, files: [domain(page.url)] };
+      return { text: `${header}${where}\n${fromWeb(page.text.slice(start, end))}${more}`, files: [domain(page.url)] };
     }
     if (name === "update_todos") {
       // One list per reply, replaced in place each time; the result repeats it so the model sees where it is.
@@ -476,32 +557,71 @@ export async function runTool(context: ToolContext, name: ToolName, args: Args):
       return { text: `${words}${listed}${total && !listed.includes("more files") ? `\n… ${total} more files.` : ""}`, files: found.files.map((file) => file.path).slice(0, 8) };
     }
     if (name === "read") {
-      const file = await workspace.read(args.path ?? "", args.line, size - 160);
-      if (file.binary) return { text: `${file.path} is a binary file.`, files: [file.path] };
-      const span = file.start > 1 || file.truncated ? ` (lines ${file.start}–${file.end} of ${file.lines})` : "";
-      const more = file.next ? `\n… more below. Read again from line ${file.next} to continue.` : file.truncated ? "\n… the file is larger than can be read here." : "";
-      return { text: `${file.path}${span}:\n${file.content}${more}`, files: [file.path] };
+      // Each file gets an equal share of the result's room; `line` continues one long file.
+      const paths = [...new Set(args.paths ?? [])];
+      const share = Math.floor(size / paths.length);
+      const read = async (path: string) => {
+        try {
+          const one = paths.length === 1;
+          const file = await workspace.read(path, one ? args.line : undefined, share - 160, one ? args.start : undefined);
+          if (file.binary) return { text: `${file.path} is a binary file.`, path: file.path };
+          const span =
+            file.nextColumn !== undefined
+              ? ` (line ${file.start}, characters ${file.column}–${file.nextColumn} of a long line; ${file.lines} line${file.lines === 1 ? "" : "s"} in all)`
+              : file.column
+                ? ` (line ${file.start} from character ${file.column}, through line ${file.end} of ${file.lines})`
+                : file.start > 1 || file.truncated
+                  ? ` (lines ${file.start}–${file.end} of ${file.lines})`
+                  : "";
+          const again = `Read ${paths.length > 1 ? `${file.path} ` : ""}again from`;
+          const more = file.nextColumn
+            ? `\n… this line goes on. ${again} line ${file.start}, start ${file.nextColumn} to continue.`
+            : file.next
+              ? `\n… more below. ${again} line ${file.next} to continue.`
+              : file.truncated && !file.column
+                ? "\n… the file is larger than can be read here."
+                : "";
+          return { text: `${file.path}${span}:\n${file.content}${more}`, path: file.path, whole: !span && !more };
+        } catch (error) {
+          // One file that cannot be read leaves the others' results; alone, it fails the call as before.
+          if (paths.length === 1 || context.signal.aborted) throw error;
+          return { text: `${path}: ${error instanceof AccessDenied ? "Denied" : "Failed"}: ${error instanceof Error ? error.message : "it could not be read."}`, path: undefined };
+        }
+      };
+      const results = await Promise.all(paths.map(read));
+      return {
+        text: results.map((result) => result.text).join("\n\n"),
+        files: results.flatMap((result) => (result.path ? [result.path] : [])),
+        whole: results.flatMap((result) => (result.path && "whole" in result && result.whole ? [result.path] : [])),
+      };
     }
     if (name === "edit") {
       const edited = await workspace.edit(args.path ?? "", args.find ?? "", args.replace ?? "");
       const id = `edit-${crypto.randomUUID()}`;
       writer.write({ type: "tool-input-available", toolCallId: id, toolName: "edit_file", input: { path: edited.path }, dynamic: true });
       writer.write({ type: "tool-output-available", toolCallId: id, output: edited, dynamic: true });
-      return { text: `Edited ${edited.path}: replaced ${edited.deletions} line${edited.deletions === 1 ? "" : "s"} with ${edited.additions}.`, wrote: edited.path };
+      // The change as it was written, which may differ from what the call sent: a loose match re-indents it and keeps
+      // the file's line endings (Workspace.edit). Seeing it, the model need not read the file again to check.
+      const said = `Edited ${edited.path}: replaced ${edited.deletions} line${edited.deletions === 1 ? "" : "s"} with ${edited.additions}.`;
+      const room = size - said.length - 40;
+      const change = edited.patch.length <= room ? edited.patch : room > 200 ? `${edited.patch.slice(0, room)}\n… the rest of the change is left out.` : "";
+      return { text: change ? `${said} The change as written:\n${change}` : said, wrote: edited.path, card: id };
     }
     if (name === "write") {
       const written = await workspace.write(args.path ?? "", args.content ?? "");
       const id = `edit-${crypto.randomUUID()}`;
       writer.write({ type: "tool-input-available", toolCallId: id, toolName: "edit_file", input: { path: written.path }, dynamic: true });
       writer.write({ type: "tool-output-available", toolCallId: id, output: written, dynamic: true });
-      return { text: `${written.created ? "Created" : "Replaced"} ${written.path} (${written.additions} lines).`, wrote: written.path };
+      return { text: `${written.created ? "Created" : "Replaced"} ${written.path} (${written.additions} lines).`, wrote: written.path, card: id };
     }
     if (name === "delete") return await deleteFiles(context, [...new Set(args.paths ?? [])]);
   } catch (error) {
     if (context.signal.aborted) throw error;
     const message = error instanceof Error ? error.message : "The action failed.";
     if (error instanceof AccessDenied) return { text: `Denied: ${message}`, blocked: message, level: error.level };
-    return { text: `Failed: ${message}`, failed: message.slice(0, 120) };
+    // The trace shows the failure's first line; the rest (an edit's closest lines) opens under it.
+    const failed = message.split("\n")[0].slice(0, 120);
+    return { text: `Failed: ${message}`, failed, ...(message.length > failed.length ? { detail: message } : {}) };
   }
   return { text: `Not run: ${name} is not available here.`, failed: "Not available" };
 }

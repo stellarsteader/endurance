@@ -50,7 +50,7 @@ There are no prebuilt downloads yet. Build the app on your Mac:
 3. Open `release/mac-arm64/Endurance.app` (Intel: `release/mac/Endurance.app`). Drag it to Applications to keep it. From then on the app runs without a terminal or Node.
 4. Start a model runtime such as Ollama or LM Studio. Endurance lists servers running at their default address; add any other server with **Add server**.
 
-Your chats, projects and settings are kept in `~/Library/Application Support/Endurance` on your Mac.
+Your chats, projects, settings and connections are kept in `~/Library/Application Support/Endurance` on your Mac.
 
 ### Opening a downloaded build
 
@@ -91,7 +91,7 @@ npm ci
 npm run dev
 ```
 
-`npm run dev` updates UI changes in place and restarts the app when main-process or worker code changes. A restart stops a reply in progress.
+`npm run dev` updates UI changes in place and restarts the app when main-process or worker code changes. A restart stops a reply in progress. It uses its own profile, `~/Library/Application Support/Endurance Dev`, and its history key is "Endurance Dev Safe Storage" in the Keychain. macOS asks for that key until you choose **Always Allow**, and again after the repo moves or Electron is reinstalled.
 
 | Work | Command |
 | --- | --- |
