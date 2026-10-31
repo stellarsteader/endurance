@@ -4,6 +4,7 @@
  */
 import type { RuntimeConnection } from "../../lib/models";
 import { connectionTransport } from "../../harness/runtime";
+import { requireSecureAddress } from "../../lib/connections";
 import type { HFDownloadInput, HFFile, HFModel, HFProgress, Modality } from "./types";
 
 const REPOSITORY =
@@ -369,6 +370,8 @@ export function managementURL(input: { connection: RuntimeConnection }): string 
     url.hash
   )
     fail("Invalid connected runtime URL.");
+  // Downloads and pulls are built from here rather than from endpoint(), so the HTTPS rule is checked here too.
+  requireSecureAddress(url.href);
   // Preserve reverse proxy prefixes, removing only a known inference API suffix.
   return url.href.replace(/\/+$/, "").replace(/\/(?:api\/)?v1$/, "");
 }

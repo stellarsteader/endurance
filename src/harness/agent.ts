@@ -25,7 +25,8 @@ import { thinkingRequest } from "./thinking";
 import { learnOutput, learnRatio, measure, modelProfile, nextReserve, recheckWindow, windowFromError, withLiveWindow } from "./profile/models";
 import { findSkill, readSkill, skillBudget, skillCatalog } from "./skills";
 import { AccessDenied, Workspace } from "./workspace-tools";
-import { checkOnly, needsApproval, runShell, shellAvailable, TIMEOUT_MS } from "./shell";
+import { checkOnly, needsApproval, refusedHomePaths, runShell, shellAvailable, TIMEOUT_MS, triedNetwork } from "./shell";
+import os from "node:os";
 import { commandKeys } from "../lib/command-key";
 import { applyStored, carryCounts, compactHistory, compactSteps, stateNote, summaryMessage, type State } from "./compaction";
 import { earlierState, openPlanFromLastReply, planText } from "./earlier";
@@ -469,8 +470,9 @@ function shellTarget(run: Run, env: Env, args: Args) {
   const { workspace } = env;
   const cwd = args.cwd ? workspace.resolve(args.cwd) : workspace.policy.folders.find((folder) => folder.access !== "none")?.path;
   if (!cwd || accessFor(workspace.policy, cwd) === "none") throw new AccessDenied(`${args.cwd ?? "This project"} has no access.`, args.cwd ?? "");
-  // The network follows Internet Access, and a run where going online was refused stays off it.
-  return { command: args.command ?? "", cwd, label: workspace.label(cwd), network: env.abilities.web && run.web !== false };
+  // Commands are offline unless one asks to go online; that is approved per command (needsApproval), apart from the
+  // Internet Access that web search and fetch follow.
+  return { command: args.command ?? "", cwd, label: workspace.label(cwd), network: Boolean(args.network) };
 }
 
 /** The command's target for its approval card, or undefined when it cannot run anyway (runCall says why). */
@@ -489,7 +491,7 @@ function askableTarget(run: Run, env: Env, args: Args) {
 async function shellCall(run: Run, env: Env, call: StreamedToolCall, args: Args, room: number): Promise<Outcome> {
   const decision = run.decisions.get(call.id);
   if (decision && !decision.approved) return { text: "Not run: the user denied this command. Do not run it again; continue without it or ask what they would like instead.", blocked: "Command denied" };
-  if (!decision && needsApproval(env.body.approval, args.command ?? "", allowedIn(run.chatId)))
+  if (!decision && needsApproval(env.body.approval, args.command ?? "", allowedIn(run.chatId), Boolean(args.network)))
     return { text: "Not run: this command needs the user's approval, which only the main agent can ask for. Report that it needs running instead.", failed: "Needs approval" };
   if (room < LEAST_RESULT) return { text: "Not run: the context has no room left for its output. Answer with what you have.", failed: "No room left" };
   let target: ReturnType<typeof shellTarget>;
@@ -539,8 +541,14 @@ async function shellCall(run: Run, env: Env, call: StreamedToolCall, args: Args,
   // A failing command is a result like any other; only what kept it from running counts as a failure.
   const status = result.timedOut ? `stopped after ${TIMEOUT_MS / 60_000} minutes` : result.exitCode === null ? "stopped" : `exit code ${result.exitCode}`;
   const header = `$ ${command}\n(${status}${cwd === env.workspace.policy.folders[0]?.path ? "" : `, in ${label}`})\n`;
-  const keep = Math.max(200, charsFor(room, run.ratio) - header.length - 80);
-  return { text: header + (headAndTail(result.output, keep) || "(no output)") };
+  // What the sandbox refused, said plainly, so the model does not take it for a missing file or a broken network.
+  const refused = refusedHomePaths(result.output, os.homedir());
+  const notes = [
+    refused.length ? `The sandbox does not let commands read these, outside the project in the home folder: ${refused.join(", ")}. Ask the user if the work needs them.` : "",
+    !network && result.exitCode !== 0 && triedNetwork(result.output) ? "This command ran without network. To reach the internet, call run_shell again with network set to true; the user approves it on a card. Internet Access does not affect commands." : "",
+  ].filter(Boolean);
+  const keep = Math.max(200, charsFor(room, run.ratio) - header.length - 80 - notes.join(" ").length);
+  return { text: header + (headAndTail(result.output, keep) || "(no output)") + (notes.length ? `\n\n${notes.join("\n")}` : "") };
 }
 
 /** Of a command's output, the share kept from its start when it is too long; the rest comes from its end. */
@@ -820,7 +828,7 @@ async function runCalls(run: Run, env: Env, calls: StreamedToolCall[]) {
     if (name === "run_shell" && !run.decisions.has(call.id) && env.ask && !planGate(run, name, argsOf(call.input))) {
       const args = argsOf(call.input);
       const target = missing(name, args) ? undefined : askableTarget(run, env, args);
-      if (target && needsApproval(env.body.approval, target.command, allowedIn(run.chatId)) && env.ask(calls.slice(index), { kind: "run_shell", input: { command: target.command, cwd: target.label, network: target.network } }))
+      if (target && needsApproval(env.body.approval, target.command, allowedIn(run.chatId), target.network) && env.ask(calls.slice(index), { kind: "run_shell", input: { command: target.command, cwd: target.label, network: target.network } }))
         return false;
     }
     // Read-only calls next to it run with it, as one group; it ends before a call that may ask first or change

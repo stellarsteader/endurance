@@ -14,8 +14,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${HOST_HF_HOME}:/hf
       - ./state:/state
+    # Loopback only: other devices come in through Tailscale Serve (install.sh). Docker's rules for published ports
+    # come before ufw's, so this address, not the firewall, is what keeps the port off the network.
     ports:
-      - "${PORT:-8100}:8100"
+      - "127.0.0.1:${PORT:-8100}:8100"
     networks: [endurance]
 networks:
   endurance:

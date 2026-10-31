@@ -4,7 +4,10 @@
  * - files are written only inside Read & write folders and a temporary folder of the command's own;
  * - nothing is read or written in No access folders, in secrets files (the patterns the file tools refuse) or in the
  *   person's credentials and app data (~/.ssh, ~/.aws, ~/.gnupg, keychains, browser and Endurance profiles);
- * - there is no network unless Internet Access is on;
+ * - the agent's commands read nothing else in the home folder either, apart from the project, the shell's startup
+ *   files, git's settings and toolchains (closeHome); the person's own terminal keeps the home folder open;
+ * - there is no network unless the command asked for it and the person allowed it (needsApproval), whatever Internet
+ *   Access says: web search being on must not let every command send what it read anywhere;
  * - a command runs for at most TIMEOUT_MS, then its whole process group is stopped.
  * Which commands ask first follows the chat's approval mode (needsApproval). Commands run in a login shell, so the
  * person's PATH (Homebrew, toolchains) applies as in their terminal.
@@ -53,8 +56,11 @@ export function checkOnly(command: string) {
  * Ask asks for every command, Approve for me for all but checks, Full access never. `allowed` holds the command keys
  * the person chose Always allow for in this chat (lib/command-key); a command whose every part has one of them runs.
  */
-export function needsApproval(mode: Approval | undefined, command: string, allowed: ReadonlySet<string>) {
-  if (mode === "full" || coveredBy(command, allowed)) return false;
+export function needsApproval(mode: Approval | undefined, command: string, allowed: ReadonlySet<string>, network = false) {
+  if (mode === "full") return false;
+  // Going online is asked about each time: an Always allow rule names a command, not where it may send data.
+  if (network) return true;
+  if (coveredBy(command, allowed)) return false;
   if (mode === "auto") return !checkOnly(command);
   return true;
 }
@@ -103,7 +109,22 @@ export interface SandboxPaths {
   tmp: string;
   home: string;
   network: boolean;
+  /**
+   * Close the home folder to reads apart from the project and HOME_READABLE: for the agent's commands, which a misled
+   * model may run. The person's terminal leaves it open, since they chose to run what they type.
+   */
+  closeHome?: boolean;
 }
+
+/**
+ * What an agent's command may still read in a closed home folder: the login shell's startup files (commands run in
+ * one), git's settings, and the toolchains builds use. Grows as projects need more; a refused read names its path
+ * (refusedHomePaths).
+ */
+const HOME_READABLE = {
+  files: [".zshrc", ".zprofile", ".zshenv", ".zlogin", ".profile", ".bashrc", ".bash_profile", ".gitconfig"],
+  folders: [".oh-my-zsh", ".config/git", ".nvm", ".cargo", ".rustup", ".pyenv", ".rbenv", ".local/bin", ".bun", ".deno", ".volta", ".asdf"],
+};
 
 /** The sandbox profile. Later rules win, so each narrower rule comes after the wider one it limits. */
 export function sandboxProfile(paths: SandboxPaths) {
@@ -118,8 +139,15 @@ export function sandboxProfile(paths: SandboxPaths) {
     "(deny file-write*)",
     `(allow file-write* ${subpaths([...paths.writable, paths.tmp])} (literal "/dev/null") (literal "/dev/zero") (regex #"^/dev/(tty|ttys[0-9]+|fd/|ptmx|dtracehelper)"))`,
     paths.readOnly.length ? `(deny file-write* ${subpaths(paths.readOnly)})` : "",
-    `(deny file-read* file-write* ${secrets} ${subpaths([...paths.blocked, ...privateDirs])})`,
-    exceptions ? `(allow file-read* ${exceptions})` : "",
+    // Contents only: names and sizes stay visible, since tools walk parent folders (git finding its repository).
+    paths.closeHome ? `(deny file-read-data ${subpaths([paths.home])})` : "",
+    paths.closeHome
+      ? `(allow file-read-data ${subpaths([...paths.projects, ...HOME_READABLE.folders.map((item) => path.join(paths.home, item))])} ${HOME_READABLE.files.map((item) => `(literal ${quote(path.join(paths.home, item))})`).join(" ")})`
+      : "",
+    // file-read-data is named as well as file-read*: an allow for that one operation (above) outranks a later rule
+    // for file-read* (checked with sandbox-exec on macOS 26), and No access folders inside the project must stay shut.
+    `(deny file-read* file-read-data file-write* ${secrets} ${subpaths([...paths.blocked, ...privateDirs])})`,
+    exceptions ? `(allow file-read* file-read-data ${exceptions})` : "",
     paths.network ? "" : '(deny network-outbound (remote ip "*:*"))',
   ]
     .filter(Boolean)
@@ -186,7 +214,7 @@ export function stopAllShells() {
 
 export async function runShell(options: RunOptions): Promise<ShellResult> {
   const tmp = await realpath(await mkdtemp(path.join(os.tmpdir(), "endurance-shell-")));
-  const profile = sandboxProfile({ ...(await realAccess(options.policy)), tmp, home: os.homedir(), network: options.network });
+  const profile = sandboxProfile({ ...(await realAccess(options.policy)), tmp, home: os.homedir(), network: options.network, closeHome: true });
   const env: NodeJS.ProcessEnv = {
     HOME: os.homedir(),
     USER: os.userInfo().username,
@@ -199,6 +227,8 @@ export async function runShell(options: RunOptions): Promise<ShellResult> {
     npm_config_cache: path.join(tmp, "npm"),
     PIP_CACHE_DIR: path.join(tmp, "pip"),
     NO_COLOR: "1",
+    // Offline, package managers fail at once instead of retrying until the time limit (npm waited out two minutes).
+    ...(options.network ? {} : { npm_config_fetch_retries: "0", PIP_RETRIES: "0" }),
   };
   let output = "";
   let timedOut = false;
@@ -243,3 +273,19 @@ export async function runShell(options: RunOptions): Promise<ShellResult> {
     await rm(tmp, { recursive: true, force: true });
   }
 }
+
+/**
+ * Paths in the home folder a command was refused, from its error lines, so the model can tell a closed folder from a
+ * missing file and say what it needs.
+ */
+export function refusedHomePaths(output: string, home: string) {
+  const inHome = new RegExp(`${escapeRegex(home)}/[^\\s:'"]+`, "g");
+  const found = new Set<string>();
+  for (const line of output.split("\n")) if (/not permitted/i.test(line)) for (const match of line.match(inHome) ?? []) found.add(match);
+  return [...found].slice(0, 5);
+}
+
+/** Error lines of a command that tried to go online without the network. */
+const OFFLINE =
+  /couldn't connect to server|failed to connect to|could not resolve host|getaddrinfo|ENOTFOUND|EAI_AGAIN|connect EPERM|network is unreachable|temporary failure in name resolution|nodename nor servname|urlopen error \[Errno 1\]|FetchError: request to/i;
+export const triedNetwork = (output: string) => OFFLINE.test(output);

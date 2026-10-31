@@ -97,6 +97,47 @@ export function classifyHost(hostname: string): ServerLocation {
   return "remote";
 }
 
+/**
+ * This computer for the purpose of sending plain HTTP: `localhost`, 127.0.0.0/8 and `::1`. Unlike
+ * classifyHost, the person's network and Tailscale addresses do not count, and neither do other names that
+ * may resolve here, because only these never leave the machine.
+ */
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === "::1") return true;
+  return ipv4(host)?.[0] === 127;
+}
+
+/** Why an address is refused, shown when adding a server and wherever a saved one is used. */
+export const HTTPS_REQUIRED =
+  "Plain http:// is only allowed for this computer (127.0.0.1, localhost or [::1]). Use an https:// address for this server, for example through Tailscale Serve or a reverse proxy such as Caddy or nginx.";
+
+export class InsecureAddressError extends Error {
+  constructor() {
+    super(HTTPS_REQUIRED);
+    this.name = "InsecureAddressError";
+  }
+}
+
+/**
+ * The refusal for an address that would carry prompts and keys unencrypted to another computer, or undefined
+ * when it may be used. One rule with no exceptions: Tailscale encrypts its own traffic, but Serve gives an
+ * https:// address anyway. Addresses that do not parse are left to the checks that read them.
+ */
+export function plainHttpRefusal(baseUrl: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(baseUrl.trim());
+  } catch {
+    return undefined;
+  }
+  return url.protocol === "http:" && !isLoopbackHost(url.hostname) ? HTTPS_REQUIRED : undefined;
+}
+
+export function requireSecureAddress(baseUrl: string) {
+  if (plainHttpRefusal(baseUrl)) throw new InsecureAddressError();
+}
+
 /** A name that resolves to several addresses is as far away as its farthest one. */
 export function classifyAddresses(addresses: string[], fallback: ServerLocation): ServerLocation {
   if (!addresses.length) return fallback;
@@ -180,7 +221,9 @@ const variables = (value: string) => [...value.matchAll(VARIABLE)].map((match) =
 function splitAddress(input: string): { baseUrl: string; query?: string } {
   let text = input.trim();
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
-    // Servers on this computer or the person's network usually serve plain HTTP; others HTTPS.
+    // Servers on this computer or the person's network usually serve plain HTTP; others HTTPS. A bare
+    // network address stays http:// so the person gets the refusal below, which says how to set up HTTPS,
+    // rather than a failed TLS handshake with a server that has none.
     const host = text.split(/[/?#:]/)[0];
     text = `${classifyHost(host) === "remote" ? "https" : "http"}://${text}`;
   }
@@ -195,6 +238,7 @@ function splitAddress(input: string): { baseUrl: string; query?: string } {
   const query = url.search.replace(/^\?/, "") || undefined;
   url.search = "";
   url.hash = "";
+  requireSecureAddress(url.href);
   const path = url.pathname.replace(ROUTE, "").replace(/\/+$/, "");
   return { baseUrl: `${url.origin}${path}`, ...(query ? { query } : {}) };
 }

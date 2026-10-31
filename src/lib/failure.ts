@@ -2,6 +2,8 @@
  * Why a reply failed, carried from the chat worker to the chat as a tag in front of the message, so the chat
  * can say what happened and offer the action that fixes it. Pure, shared by both sides.
  */
+import { HTTPS_REQUIRED } from "./connections";
+
 export type FailureKind =
   /** The server did not answer: not running, wrong address, or the network. */
   | "unreachable"
@@ -21,15 +23,20 @@ export type FailureKind =
   | "auth"
   /** The model does not answer chat requests: an embedding or speech model. */
   | "notChat"
+  /** The server's address is plain http:// to another computer, so nothing was sent. */
+  | "insecure"
   | "other";
 
-const KINDS: readonly FailureKind[] = ["unreachable", "missing", "memory", "overflow", "tools", "silent", "busy", "auth", "notChat", "other"];
+const KINDS: readonly FailureKind[] = ["unreachable", "missing", "memory", "overflow", "tools", "silent", "busy", "auth", "notChat", "insecure", "other"];
 
 export const tagFailure = (kind: FailureKind, message: string) => `[[${kind}]] ${message}`;
 
-/** The kind and the readable message of a failure as the chat received it; untagged text is "other". */
+/**
+ * The kind and the readable message of a failure as the chat received it. Untagged text is "other", except
+ * the HTTPS refusal, which the main process gives before a request reaches the chat worker.
+ */
 export function readFailure(text: string): { kind: FailureKind; message: string } {
   const match = /^\[\[(\w+)\]\] ([\s\S]*)$/.exec(text);
   if (match && KINDS.includes(match[1] as FailureKind)) return { kind: match[1] as FailureKind, message: match[2] };
-  return { kind: "other", message: text };
+  return { kind: text === HTTPS_REQUIRED ? "insecure" : "other", message: text };
 }

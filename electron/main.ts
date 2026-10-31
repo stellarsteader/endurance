@@ -119,6 +119,7 @@ function cancelOwned(owner: WebContents) {
 /**
  * The renderer names a connection; its address, secrets and location come from the saved copy.
  * Folder access and skill text are removed here and only ever filled in by this process.
+ * A saved plain http:// address to another computer throws the HTTPS refusal, so nothing is sent to it.
  */
 function resolveRuntime(request: Record<string, unknown>) {
   const connectionId = typeof request.connectionId === "string" ? request.connectionId : typeof request.runtime === "string" ? request.runtime : "";
@@ -126,6 +127,8 @@ function resolveRuntime(request: Record<string, unknown>) {
   if (!resolved) throw new Error("This model's server is no longer listed. Choose another model.");
   Object.assign(request, { connectionId, runtime: resolved.runtime, connection: resolved.value, location: resolved.location, host: resolved.host });
   // The model that reads scanned pages is named the same way; one no longer listed is dropped, and chats go on without it.
+  // One at a plain http:// address to another computer throws the HTTPS refusal like the chat's own server,
+  // so pages are not skipped without a word.
   const reader = request.reader as Record<string, unknown> | undefined;
   if (reader && typeof reader === "object") {
     const found = typeof reader.connectionId === "string" && typeof reader.runtimeModelId === "string" ? resolveConnection(reader.connectionId) : undefined;

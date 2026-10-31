@@ -19,8 +19,11 @@ export interface CatalogResult {
   /** Set by the main process from the result and the connection's history. */
   state?: ConnectionState;
 }
-/** Why a runtime did not answer, from the transport error or HTTP status. "starting" is 502/503/504. */
-export type ProbeReason = "refused" | "host" | "timeout" | "auth" | "not-api" | "tls" | "address" | "starting" | "other" | "error";
+/**
+ * Why a runtime did not answer, from the transport error or HTTP status. "starting" is 502/503/504;
+ * "insecure" is a plain http:// address to another computer, which is never asked.
+ */
+export type ProbeReason = "refused" | "host" | "timeout" | "auth" | "not-api" | "tls" | "address" | "insecure" | "starting" | "other" | "error";
 export interface RuntimeProbe {
   ok: boolean;
   /** Round trip of the first request. */
@@ -182,7 +185,9 @@ export const chatFetch: typeof fetch = async (input, init) => {
       if (event.type === "error") fail(new Error(event.message));
     });
     signal?.addEventListener("abort", abort, { once: true });
-    desktop.startChat(id, String(init?.body ?? "{}")).catch((error: Error) => fail(error));
+    // The main process refuses some requests before they start, such as one to a plain http:// server; the
+    // chat shows its reason without Electron's "Error invoking remote method" wrapper.
+    desktop.startChat(id, String(init?.body ?? "{}")).catch((error: Error) => fail(new Error(ipcMessage(error))));
     if (signal?.aborted) abort();
   });
 };

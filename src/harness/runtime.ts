@@ -3,12 +3,17 @@ import { thinkingKnob } from "./profile/template";
 import { controlFromValues, type Level, type ThinkingControl } from "../lib/thinking-switch";
 import type { CatalogResult, ProbeReason, RuntimeProbe } from "../lib/desktop";
 import { observedDefault } from "../lib/context-window";
-import { classifyHost } from "../lib/connections";
+import { classifyHost, InsecureAddressError, requireSecureAddress } from "../lib/connections";
 import { modelIdFor, PRIMARY_RUNTIMES, RUNTIMES, runtimeName, type ModelInfo, type ModelKind, type RuntimeConnection, type RuntimeId, type ServerLocation } from "../lib/models";
 
+/**
+ * The API base every runtime request is built from. It also refuses plain http:// to another computer, so
+ * no prompt, key or model command reaches the network unencrypted, whichever process sends it.
+ */
 export function endpoint(connection: RuntimeConnection) {
   const url = new URL(connection.baseUrl);
   if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.hash || url.search) throw new Error("Use an HTTP runtime URL without embedded credentials, query or fragment.");
+  requireSecureAddress(url.href);
   return url.href.replace(/\/+$/, "");
 }
 /**
@@ -72,6 +77,7 @@ export function classify(error: unknown): ProbeReason {
     return error.status === 404 || error.status === 405 ? "not-api" : "error";
   }
   if (error instanceof SyntaxError) return "not-api";
+  if (error instanceof InsecureAddressError) return "insecure";
   const value = error as { name?: string; code?: string; cause?: { code?: string; name?: string } };
   if (value?.name === "TimeoutError" || value?.name === "AbortError" || value?.cause?.name === "ConnectTimeoutError") return "timeout";
   const code = String(value?.cause?.code ?? value?.code ?? "");
@@ -313,8 +319,8 @@ export async function probeRuntime(runtime: RuntimeId, connection: RuntimeConnec
   let base: string;
   try {
     base = endpoint(connection);
-  } catch {
-    return { ok: false, reason: "address" };
+  } catch (error) {
+    return { ok: false, reason: error instanceof InsecureAddressError ? "insecure" : "address" };
   }
   const root = runtime === "ollama" ? Ollama.baseURL(base) : serverRoot(base);
   const get = async (url: string) => {
@@ -473,8 +479,8 @@ export async function inspectServer(draft: RuntimeConnection, transport: typeof 
   let base: string;
   try {
     base = endpoint(draft);
-  } catch {
-    return { baseUrl: draft.baseUrl, kind: "openai", probe: { ok: false, reason: "address" } };
+  } catch (error) {
+    return { baseUrl: draft.baseUrl, kind: "openai", probe: { ok: false, reason: error instanceof InsecureAddressError ? "insecure" : "address" } };
   }
   const candidates = /\/v1$/.test(base) ? [base] : [base, `${base}/v1`];
   let lastStatus: number | undefined;
