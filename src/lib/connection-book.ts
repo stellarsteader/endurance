@@ -12,6 +12,7 @@ import {
   migrateLegacy,
   newConnectionId,
   normalizeFile,
+  requireSecureAddress,
   type Connection,
   type ConnectionFile,
   type ConnectionView,
@@ -152,9 +153,15 @@ export class ConnectionBook {
     return list.map((item) => this.view(item));
   }
 
+  /**
+   * Every request to a saved connection starts here, so a saved address that would send plain HTTP to
+   * another computer (saved before the rule, or edited in the file) throws InsecureAddressError and its
+   * secrets are never read out.
+   */
   resolve(id: string): ResolvedConnection | undefined {
     const connection = this.get(id);
     if (!connection) return undefined;
+    requireSecureAddress(connection.baseUrl);
     const base: RuntimeConnection = {
       baseUrl: connection.baseUrl,
       apiKey: "",
@@ -171,6 +178,7 @@ export class ConnectionBook {
   }
 
   add(fields: ConnectionFields): Connection {
+    requireSecureAddress(fields.baseUrl);
     const connection: Connection = { id: newConnectionId(), ...clean(fields) };
     this.load().connections.push(connection);
     this.save();
@@ -206,6 +214,9 @@ export class ConnectionBook {
         owner: pick("owner"),
       }),
     };
+    // A new address must meet the HTTPS rule. A saved one that does not can still be renamed or marked,
+    // since it is refused whenever it is used.
+    if (next.baseUrl !== current.baseUrl) requireSecureAddress(next.baseUrl);
     // History belongs to the address: a new address has not answered yet.
     if (next.baseUrl === current.baseUrl && current.lastConnectedAt) next.lastConnectedAt = current.lastConnectedAt;
     file.connections[index] = next;

@@ -5,6 +5,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { cloneElement, isValidElement, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { extractTableDataFromElement, tableDataToTSV, type Components } from "streamdown";
+import { ReplyImage, ReplySource } from "./reply-image";
 
 /**
  * Tables and code blocks in replies: one box each, without the library's toolbar, and a copy icon just outside
@@ -93,4 +94,8 @@ function Pre({ children, node }: { children?: ReactNode; node?: HastNode }) {
   );
 }
 
-export const markdownComponents: Components = { table: Table, pre: Pre } as Components;
+/**
+ * Every Markdown view of a model's text: replies and thinking alike. Images from other servers wait for a click
+ * (reply-image), so text a misled model writes cannot send data out just by being shown.
+ */
+export const markdownComponents: Components = { table: Table, pre: Pre, img: ReplyImage, source: ReplySource } as Components;

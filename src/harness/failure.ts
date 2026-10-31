@@ -6,6 +6,7 @@
 import { LLMError } from "./vendor/llm/schema";
 import { isContextOverflow } from "./vendor/llm/provider-error";
 import { tagFailure, type FailureKind } from "../lib/failure";
+import { HTTPS_REQUIRED } from "../lib/connections";
 import { unsupportedTools } from "./tool-support";
 
 const MEMORY = /requires more system memory|out of memory|insufficient memory|not enough memory|unable to allocate|failed to allocate|\bOOM\b|model is too large/i;
@@ -19,6 +20,7 @@ const messageOf = (error: unknown) => (error instanceof LLMError ? error.reason.
 export function failureKind(error: unknown): FailureKind {
   const message = messageOf(error);
   if (error instanceof Error && error.name === "Silent") return "silent";
+  if (message === HTTPS_REQUIRED) return "insecure";
   if (MEMORY.test(message)) return "memory";
   if (unsupportedTools(message)) return "tools";
   if (isContextOverflow(message) || /context window is \d+ tokens/.test(message)) return "overflow";

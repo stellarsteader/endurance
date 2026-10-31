@@ -289,6 +289,7 @@ const FAILURES: Record<FailureKind, { title: string; fix?: "models" | "picker" |
   busy: { title: "The server is busy" },
   auth: { title: "The server refused the key", fix: "connections" },
   notChat: { title: "This model doesn't chat. It's now hidden from chat models; change that in Models settings", fix: "picker" },
+  insecure: { title: "This server needs an https:// address", fix: "connections" },
   other: { title: "Request failed" },
 };
 const FIXES = { models: "Models settings", picker: "Choose another model", connections: "Connections" } as const;

@@ -14,7 +14,7 @@ import {
   runtimeName,
   type RuntimeId,
 } from "@/lib/models";
-import { classifyHost, locationLabel, parseServerInput, SUPPORTED_RUNTIMES, type ConnectionView, type ParsedServer } from "@/lib/connections";
+import { classifyHost, locationLabel, parseServerInput, plainHttpRefusal, SUPPORTED_RUNTIMES, type ConnectionView, type ParsedServer } from "@/lib/connections";
 import { LocationBadge } from "./location-badge";
 import { DragCard, DropIndicator, Reorderable, useReorderDrag, useReorderDrop } from "./reorder";
 import { moveId, type DropPosition } from "@/lib/ordering";
@@ -183,6 +183,8 @@ function reasonText(reason: ProbeReason | undefined, hasKey: boolean, status?: n
       return "Starting";
     case "address":
       return "Invalid address";
+    case "insecure":
+      return "Needs an https:// address";
     default:
       return status ? `Unavailable · HTTP ${status}` : "Unavailable";
   }
@@ -576,6 +578,9 @@ function ConnectionRow({
   const parsed = headersText === null ? null : parseHeaders(headersText);
   const headersError = parsed && "error" in parsed ? parsed.error : "";
   const address = normalizeBaseUrl(baseUrl, defaults?.baseUrl || connection.baseUrl);
+  // The main process refuses these too; checking here shows why before Test or Save is tried.
+  const addressRefusal = plainHttpRefusal(address);
+  const savedRefusal = plainHttpRefusal(connection.baseUrl);
   // Saved secrets are bound to the saved address; a new address gets them only when the person says so.
   const addressChanged = address.replace(/\/+$/, "") !== connection.baseUrl.replace(/\/+$/, "");
   const secretsUsable = hasSaved && (!saved.elsewhere || moveSecrets) && (!addressChanged || moveSecrets);
@@ -595,7 +600,7 @@ function ConnectionRow({
     setSaveError("");
   };
   const test = async () => {
-    if (!window.endurance || headersError) return;
+    if (!window.endurance || headersError || addressRefusal) return;
     const run = ++testRun.current;
     setTesting(true);
     setProbe(null);
@@ -647,7 +652,7 @@ function ConnectionRow({
   const toggle = () => onOpenChange(!open);
 
   const save = async () => {
-    if (headersError || saving || !window.endurance) return;
+    if (headersError || addressRefusal || saving || !window.endurance) return;
     setSaving(true);
     try {
       const apiKey = keyFor();
@@ -668,7 +673,8 @@ function ConnectionRow({
     }
   };
 
-  const status = statusLine(catalog, connection.id === "ollama" ? ollama : undefined, saved.hasKey, connection.lastConnectedAt);
+  // A refused address is never checked, so its row says why from the first render.
+  const status = savedRefusal ? reasonText("insecure", false) : statusLine(catalog, connection.id === "ollama" ? ollama : undefined, saved.hasKey, connection.lastConnectedAt);
   // Dragged by its heading; a row being edited stays put.
   const editing = open || setupOpen;
   const { setNode: setDrag, handle, dragging } = useReorderDrag({ kind: "server", id: connection.id, data: null }, editing);
@@ -684,9 +690,10 @@ function ConnectionRow({
           </div>
           <div className="truncate font-mono text-[12px] leading-[1.35] text-muted-foreground">{endpointLabel(connection.baseUrl)}</div>
           <div className="flex items-center gap-1.5 text-[12px] leading-[1.35] text-muted-foreground">
-            <Dot state={catalog?.state} />
+            <Dot state={savedRefusal ? "unavailable" : catalog?.state} />
             <span className="truncate">{status}</span>
           </div>
+          {savedRefusal && !open && <p className="text-[12px] leading-[1.35] text-destructive">{savedRefusal}</p>}
         </div>
         {connection.id === "ollama" && ollama && !connected && onOllama && <OllamaAction onStatus={onOllama} status={ollama} />}
         {showSetup && (
@@ -774,6 +781,8 @@ function ConnectionRow({
               )}
             </div>
             <Input
+              aria-describedby={addressRefusal ? `${formId}-address-error` : undefined}
+              aria-invalid={Boolean(addressRefusal)}
               autoCapitalize="off"
               className="font-mono text-[13px]"
               id={`${formId}-address`}
@@ -782,6 +791,11 @@ function ConnectionRow({
               spellCheck={false}
               value={baseUrl}
             />
+            {addressRefusal && (
+              <p className="!mt-1 text-[12px] leading-[1.35] text-destructive" id={`${formId}-address-error`}>
+                {addressRefusal}
+              </p>
+            )}
             {hasSaved && (addressChanged || saved.elsewhere) && (
               <label className="!mt-2 flex items-start gap-2 text-[12px] leading-[1.35] text-muted-foreground">
                 <input
@@ -915,7 +929,7 @@ function ConnectionRow({
                 <Button
                   aria-label={`Test ${connection.label} connection`}
                   className="h-7 shrink-0 gap-1.5 rounded-[6px] px-2.5 text-[12px]"
-                  disabled={testing || Boolean(headersError)}
+                  disabled={testing || Boolean(headersError) || Boolean(addressRefusal)}
                   onClick={() => void test()}
                   type="button"
                   variant="secondary"
@@ -936,7 +950,7 @@ function ConnectionRow({
               <Button className="h-7 shrink-0 rounded-[6px] text-[12px]" onClick={() => onOpenChange(false)} type="button" variant="ghost">
                 Cancel
               </Button>
-              <Button className="h-7 shrink-0 rounded-[6px] text-[12px]" disabled={saving || Boolean(headersError)} type="submit">
+              <Button className="h-7 shrink-0 rounded-[6px] text-[12px]" disabled={saving || Boolean(headersError) || Boolean(addressRefusal)} type="submit">
                 Save
               </Button>
             </div>

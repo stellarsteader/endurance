@@ -62,8 +62,15 @@ const SPECS: Record<ToolName, { description: string; parameters: object }> = {
   },
   run_shell: {
     description:
-      "Run a shell command (zsh) in a project folder, for builds, tests, git and checks. For reading, finding, changing or deleting files, the file tools work better: they follow each folder's access, and the user can undo their changes, which is not possible for a command's changes. It runs sandboxed: it writes only in Read & write folders, cannot open secrets or No access folders, reaches the internet only when Internet Access is on, and stops after 2 minutes. Commands may need the user's approval.",
-    parameters: object({ command: text("The command."), cwd: text("Folder to run in, as listed; the first project folder when left out.") }, ["command"]),
+      "Run a shell command (zsh) in a project folder, for builds, tests, git and checks. For reading, finding, changing or deleting files, the file tools work better: they follow each folder's access, and the user can undo their changes, which is not possible for a command's changes. It runs sandboxed: it writes only in Read & write folders, cannot open secrets or No access folders, has no network unless you set network, and stops after 2 minutes. Commands may need the user's approval.",
+    parameters: object(
+      {
+        command: text("The command."),
+        cwd: text("Folder to run in, as listed; the first project folder when left out."),
+        network: { type: "boolean", description: "True only when the command must reach the internet, such as installing packages or git push. The user is asked first." },
+      },
+      ["command"]
+    ),
   },
   web_search: {
     description: `Search the internet. Results are numbered sources. For recent topics include the year (${new Date().getFullYear()}).`,
@@ -181,6 +188,7 @@ export interface Args {
   steps?: { title?: string; detail?: string }[];
   assignments?: { name?: string; kind?: "explore" | "work"; task?: string; paths?: string[] }[];
   command?: string;
+  network?: boolean;
   cwd?: string;
   question?: string;
   options?: string[];
@@ -246,6 +254,7 @@ export function argsOf(input: unknown): Args {
     assignments,
     command: string(raw.command)?.trim(),
     cwd: string(raw.cwd)?.trim(),
+    network: raw.network === true || raw.network === "true",
     question: string(raw.question)?.trim(),
     // Small models write options as objects or a single string; each becomes a short line of text.
     options: (Array.isArray(raw.options) ? raw.options : typeof raw.options === "string" ? raw.options.split(/\n|;/) : [])

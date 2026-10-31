@@ -5,7 +5,18 @@
 import { BrowserWindow, ipcMain } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { detectRuntimes, discoverModels, inspectServer, probeRuntime } from "../src/harness/runtime";
-import { connectionState, isBuiltinId, isOwner, parseServerInput, validConnectionId, type LegacySettings } from "../src/lib/connections";
+import {
+  connectionState,
+  HTTPS_REQUIRED,
+  InsecureAddressError,
+  isBuiltinId,
+  isOwner,
+  parseServerInput,
+  plainHttpRefusal,
+  requireSecureAddress,
+  validConnectionId,
+  type LegacySettings,
+} from "../src/lib/connections";
 import { sameAddress } from "../src/lib/connection-vault";
 import { isRuntimeId, type RuntimeConnection } from "../src/lib/models";
 import type { CatalogResult, ConnectionEdit, ConnectionTest, RuntimeProbe, ServerCheck, ServerDraft } from "../src/lib/desktop";
@@ -57,6 +68,13 @@ function schedule(id: string, starting: boolean) {
 }
 
 async function check(id: string, rescheduling = true) {
+  const saved = book.get(id);
+  // A saved address that breaks the HTTPS rule is not asked at all; its row says why instead.
+  if (saved && plainHttpRefusal(saved.baseUrl)) {
+    catalog.set(id, { connectionId: id, runtime: saved.kind, models: [], error: HTTPS_REQUIRED, reason: "insecure", state: "unavailable" });
+    schedule(id, false);
+    return;
+  }
   const resolved = book.resolve(id);
   if (!resolved) {
     catalog.delete(id);
@@ -170,6 +188,8 @@ export function registerConnectionsIPC(trusted: Trust) {
     const current = book.get(id)!;
     const baseUrl = edit.baseUrl === undefined ? current.baseUrl : validAddress(edit.baseUrl);
     const moved = !sameAddress(baseUrl, current.baseUrl);
+    // Checked before the new address is asked what it serves; an unchanged one is refused when used.
+    if (moved) requireSecureAddress(baseUrl);
     let kind = current.kind;
     // An added server at a new address is identified again; a builtin connection stays its runtime.
     if (moved && !isBuiltinId(id)) {
@@ -192,7 +212,8 @@ export function registerConnectionsIPC(trusted: Trust) {
   // Shown on the Connections page; development endpoints are asked only of a server the person runs.
   ipcMain.handle("connections:server-info", async (event, id: unknown): Promise<ServerInfo | undefined> => {
     trusted(event);
-    const resolved = validConnectionId(id) ? book.resolve(id) : undefined;
+    // A refused address has no details to show; its row already says why.
+    const resolved = validConnectionId(id) && !plainHttpRefusal(book.get(id)?.baseUrl ?? "") ? book.resolve(id) : undefined;
     if (!resolved || resolved.runtime !== "vllm") return undefined;
     return vllmServerInfo(resolved.value, book.view(resolved.connection).mine);
   });
@@ -221,8 +242,9 @@ export function registerConnectionsIPC(trusted: Trust) {
     let baseUrl: string;
     try {
       baseUrl = validAddress(test.baseUrl);
-    } catch {
-      return { ok: false, reason: "address" };
+      requireSecureAddress(baseUrl);
+    } catch (error) {
+      return { ok: false, reason: error instanceof InsecureAddressError ? "insecure" : "address" };
     }
     // Without consent, only secrets bound to exactly this address are used.
     const saved = test.moveSecrets ? vault.unbound(id) : vault.apply(id, { baseUrl, apiKey: "" });
@@ -237,7 +259,10 @@ export function registerConnectionsIPC(trusted: Trust) {
   });
 }
 
-/** The saved connection for a request, with its secrets, location and label. Main process only. */
+/**
+ * The saved connection for a request, with its secrets, location and label. Main process only. Throws
+ * InsecureAddressError for a saved plain http:// address to another computer, so no request is sent.
+ */
 export function resolveConnection(id: string) {
   const resolved = book.resolve(id);
   return resolved ? { ...resolved, location: book.location(resolved.connection.baseUrl) } : undefined;

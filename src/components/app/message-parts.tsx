@@ -1106,14 +1106,22 @@ function ToolBlock({ part, live, expired }: { part: ToolPartLike; live: boolean;
                 ? "This sends search terms and page addresses to the internet. Turn Internet Access off to stop web requests from this chat."
                 : "This sends search terms and page addresses to the internet. Turn Internet Access off to keep this chat on this computer."
             ) : (
-              `Runs in ${shell?.cwd ?? "the project"}. It can change files only in Read & write folders${shell?.network ? " and can reach the internet" : " and has no internet"}, and stops after 2 minutes.`
+              `Runs in ${shell?.cwd ?? "the project"}. It can change files only in Read & write folders${shell?.network ? "" : " and has no internet"}, and stops after 2 minutes.`
             )}
           </p>
+          {/* A command that goes online can send what it has read anywhere, so it says so plainly and is asked about each time. */}
+          {shell?.network && (
+            <p className="flex items-start gap-1.5 text-[13px] leading-[1.4] text-amber-700 dark:text-amber-400">
+              <GlobeIcon className="mt-[2px] size-3.5 shrink-0" />
+              This command asks for internet access. It can send data from your project to any address, so it is asked
+              about every time.
+            </p>
+          )}
           <div className="flex flex-wrap gap-2">
             <Button className="h-7 rounded-[6px] text-[12px]" onClick={() => respond(false)} size="sm" variant="outline">
               Deny
             </Button>
-            {(web || keys.length > 0) && (
+            {(web || (keys.length > 0 && !shell?.network)) && (
               <Button className="h-7 max-w-full min-w-0 rounded-[6px] text-[12px]" onClick={() => respond(true, true)} size="sm" variant="outline">
                 {web ? `Always allow in this ${scope}` : <AllowKeys keys={keys} scope={scope} />}
               </Button>

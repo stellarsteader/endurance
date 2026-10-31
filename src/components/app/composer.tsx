@@ -154,8 +154,9 @@ function PermissionsMenu() {
           ))}
         </DropdownMenuRadioGroup>
         <p className="px-2 pt-1 pb-1.5 text-[12px] leading-4 text-muted-foreground">
-          In every mode, files change only in Read &amp; write folders, and edits aren&apos;t asked about. Going online
-          needs Internet Access. Plans and questions always wait for you.
+          In every mode, files change only in Read &amp; write folders, and edits aren&apos;t asked about. Web search
+          needs Internet Access, and a command that goes online is asked about each time outside Full access. Plans and
+          questions always wait for you.
         </p>
         <DropdownMenuSeparator className="my-1" />
         {/* For this chat: the agent proposes a plan and waits for it to be approved before it changes anything. */}
