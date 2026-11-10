@@ -181,6 +181,9 @@ else {
       return new Response(response.body, { status: response.status, headers });
     });
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "viewMenu" }, { role: "windowMenu" }]));
+    // Development runs inside the stock Electron.app, whose bundle carries Electron's icon. Packaged builds get
+    // resources/icons/icon.icns from electron-builder instead.
+    if (!app.isPackaged) app.dock?.setIcon(resolve(import.meta.dirname, "../../resources/icons/icon.png"));
     registerConnectionsIPC(trusted);
     ipcMain.handle("chat:start", async (event, id: string, body: string) => {
       trusted(event);

@@ -23,12 +23,21 @@ export interface TerminalInfo {
   network: boolean;
   /** Set once the shell has ended; the tab stays until it is closed. */
   exitCode?: number | null;
+  /** The last thing a sandboxed terminal's sandbox refused, read from its output. */
+  blocked?: TerminalBlock;
 }
+
+/**
+ * What the sandbox refused a sandboxed terminal: a path in the home folder (shown from ~), or the network when
+ * Internet Access was off as it opened. Read from error lines, the way the agent's commands are (harness/shell).
+ */
+export type TerminalBlock = { kind: "path"; path: string } | { kind: "network" };
 
 export type TerminalEvent =
   /** Output, with its size in bytes; the renderer acknowledges those bytes once they are drawn. */
   | { id: string; type: "data"; data: string; bytes: number }
-  | { id: string; type: "exit"; exitCode: number | null };
+  | { id: string; type: "exit"; exitCode: number | null }
+  | { id: string; type: "blocked"; blocked: TerminalBlock };
 
 export interface TerminalAttach {
   /** The output kept for this terminal (its last megabyte), to draw before new output. */

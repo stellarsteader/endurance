@@ -9,13 +9,13 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { ipcMessage } from "@/lib/desktop";
 import { useStore, type Project } from "@/lib/store";
-import { MAX_TERMINALS, MAX_WRITE, type TerminalEvent, type TerminalInfo, type TerminalMode } from "@/lib/terminal-api";
+import { MAX_TERMINALS, MAX_WRITE, type TerminalBlock, type TerminalEvent, type TerminalInfo, type TerminalMode } from "@/lib/terminal-api";
 import { cn } from "@/lib/utils";
 import { folderName } from "@/lib/workspace-policy";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as Xterm, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { FolderIcon, PlusIcon, ShieldCheckIcon, ShieldOffIcon, SquareTerminalIcon, XIcon } from "lucide-react";
+import { FolderIcon, PlusIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldOffIcon, SquareTerminalIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { useSession } from "./session-context";
@@ -127,7 +127,7 @@ function TerminalScreen({ id }: { id: string }) {
     const ended = (code: number | null) => term.write(`\r\n\x1b[2m[Process exited${code === null ? "" : ` with code ${code}`}]\x1b[0m\r\n`);
     const handle = (event: TerminalEvent) => {
       if (event.type === "data") term.write(event.data, () => !disposed && drawn(event.bytes));
-      else ended(event.exitCode);
+      else if (event.type === "exit") ended(event.exitCode);
     };
     const unsubscribe = api.onEvent((event) => {
       if (event.id !== id || disposed) return;
@@ -205,6 +205,7 @@ function ProjectShells({ projectId, network, visible }: { projectId: string; net
     );
     const unsubscribe = api.onEvent((event) => {
       if (event.type === "exit") setTerminals((list) => list?.map((item) => (item.id === event.id ? { ...item, exitCode: event.exitCode } : item)));
+      if (event.type === "blocked") setTerminals((list) => list?.map((item) => (item.id === event.id ? { ...item, blocked: event.blocked } : item)));
     });
     return () => {
       current = false;
@@ -290,7 +291,47 @@ function ProjectShells({ projectId, network, visible }: { projectId: string; net
           <ModeLabel info={current} />
         </div>
       </div>
+      {current.blocked && current.exitCode === undefined && (
+        <Refused
+          blocked={current.blocked}
+          onDismiss={() => setTerminals((list) => list?.map((item) => (item.id === current.id ? { ...item, blocked: undefined } : item)))}
+          projectId={projectId}
+        />
+      )}
       {visible && <TerminalScreen id={current.id} key={current.id} />}
+    </div>
+  );
+}
+
+/**
+ * What the sandbox refused the terminal, so a failed command reads as the sandbox and not as a broken tool, with
+ * what opens it: Internet Access for the network, Project settings for a path (folder access, or full permissions
+ * for what no folder setting opens, such as ~/.ssh).
+ */
+function Refused({ blocked, projectId, onDismiss }: { blocked: TerminalBlock; projectId: string; onDismiss: () => void }) {
+  const { openProjectSettings } = useStore();
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5 text-[12px] leading-[1.35] text-muted-foreground">
+      <ShieldAlertIcon className="size-3.5 shrink-0" />
+      <span className="min-w-0 flex-1">
+        {blocked.kind === "network"
+          ? "The sandbox kept this terminal offline. Turn on Internet Access, then open a new terminal."
+          : `The sandbox blocked ${blocked.path}. Project settings can open it to new terminals.`}
+      </span>
+      {blocked.kind === "path" && (
+        <Button className="h-6 rounded-[4px] px-2 text-[12px]" onClick={() => openProjectSettings(projectId)} variant="ghost">
+          Project settings
+        </Button>
+      )}
+      <button
+        aria-label="Dismiss"
+        className="flex size-5 shrink-0 items-center justify-center rounded-[3px] outline-none hover:bg-muted hover:text-foreground"
+        onClick={onDismiss}
+        title="Dismiss"
+        type="button"
+      >
+        <XIcon className="size-3" />
+      </button>
     </div>
   );
 }

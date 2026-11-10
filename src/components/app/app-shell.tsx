@@ -90,7 +90,8 @@ function NotificationOpener() {
 
 const MAX_MOUNTED = 6;
 
-function Sessions() {
+/** Stays mounted while Settings or the Library is open: an unmounted chat stops its reply. Hidden then, no chat is active. */
+function Sessions({ shown }: { shown: boolean }) {
   const { threads, activeId } = useStore();
   const [mounted, setMounted] = useState<string[]>([activeId]);
   if (!mounted.includes(activeId)) {
@@ -103,7 +104,7 @@ function Sessions() {
         const thread = threads.find((t) => t.id === id);
         // A saved chat shows once its messages are read (lib/store), so the conversation starts with all of them.
         if (!thread || thread.loaded === false) return null;
-        return <ChatSession active={id === activeId} key={id} thread={thread} />;
+        return <ChatSession active={shown && id === activeId} key={id} thread={thread} />;
       })}
     </>
   );
@@ -138,11 +139,10 @@ function Layout() {
           <div className="flex h-full min-w-0 flex-col">
             {page !== null && <SettingsTitleBar withWindowControls={!sidebarOpen} />}
             <main className="min-h-0 flex-1 bg-background">
+              <Sessions shown={page === null} />
               {librarySection !== null ? (
                 <LibraryPage />
-              ) : settingsSection === null ? (
-                <Sessions />
-              ) : settingsSection === "general" ? (
+              ) : settingsSection === null ? null : settingsSection === "general" ? (
                 <GeneralSettings />
               ) : settingsSection === "appearance" ? (
                 <AppearanceSettings />

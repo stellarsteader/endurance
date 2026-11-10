@@ -17,8 +17,8 @@ import {
   type ConnectionFile,
   type ConnectionView,
   type LegacySettings,
-  type ServerOwner,
-  ownerOf,
+  type ServerHosting,
+  hostingOf,
 } from "./connections";
 import type { ConnectionVault } from "./connection-vault";
 import { PRIMARY_RUNTIMES, type RuntimeConnection, type RuntimeId, type ServerLocation } from "./models";
@@ -45,7 +45,8 @@ export interface ConnectionFields {
   baseUrl: string;
   name?: string;
   concurrency?: number;
-  owner?: ServerOwner;
+  hosting?: ServerHosting;
+  declined?: RuntimeId;
 }
 
 const LOCATION_TTL = 10 * 60_000;
@@ -105,6 +106,46 @@ export class ConnectionBook {
     return [...this.load().dismissed];
   }
 
+  ignored(): string[] {
+    return [...this.load().ignored];
+  }
+
+  /** Stops suggesting the found server at this address. */
+  ignore(baseUrl: string) {
+    const file = this.load();
+    file.ignored = [...new Set([...file.ignored, baseUrl.trim().replace(/\/+$/, "")])];
+    this.save();
+  }
+
+  /**
+   * Sets a connection up as another runtime. An added server only changes its kind. A builtin connection is
+   * its runtime by ID, so it is replaced in the same place: by that runtime's builtin connection when it is not
+   * listed yet, else by an added server. The old ID is returned so the caller can move its secrets.
+   */
+  retype(id: string, kind: RuntimeId): Connection {
+    const file = this.load();
+    const index = file.connections.findIndex((item) => item.id === id);
+    if (index < 0) throw new Error("This server is no longer listed.");
+    const current = file.connections[index];
+    if (PRIMARY_RUNTIMES.includes(id as RuntimeId)) throw new Error("The default runtime stays as it is. Add this server separately instead.");
+    // A choice declined for the old runtime and history from it say nothing about the new one.
+    const fields: Connection = { ...current };
+    delete fields.declined;
+    delete fields.lastConnectedAt;
+    if (!isBuiltinId(id)) {
+      file.connections[index] = { ...fields, kind };
+      this.save();
+      return { ...file.connections[index] };
+    }
+    const free = isBuiltinId(kind) && !file.connections.some((item) => item.id === kind);
+    const next: Connection = { ...fields, id: free ? kind : newConnectionId(), kind };
+    file.connections[index] = next;
+    // The old runtime was not what ran here, so detection may list it again where it really runs.
+    file.dismissed = file.dismissed.filter((item) => item !== kind);
+    this.save();
+    return { ...next };
+  }
+
   /** The cached location, else what the address alone says. Never blocks on DNS. */
   location(baseUrl: string): ServerLocation {
     const host = hostOf(baseUrl);
@@ -112,12 +153,12 @@ export class ConnectionBook {
     return cached ? cached.location : classifyHost(host);
   }
 
-  /** Resolves names to addresses so a name for a private address counts as the person's network. */
+  /** Resolves names to addresses so a name for a private address counts as private. */
   async locate(baseUrl: string): Promise<ServerLocation> {
     const host = hostOf(baseUrl);
     const literal = classifyHost(host);
     // Literal addresses and loopback names need no lookup.
-    if (!host || /^[\d.]+$/.test(host) || host.includes(":") || literal === "this-computer") return literal;
+    if (!host || /^[\d.]+$/.test(host) || host.includes(":") || literal === "loopback") return literal;
     const cached = this.locations.get(host);
     if (cached && this.now() - cached.at < LOCATION_TTL) return cached.location;
     let addresses: string[] = [];
@@ -126,7 +167,7 @@ export class ConnectionBook {
     } catch {
       addresses = [];
     }
-    // A name that does not resolve keeps the literal guess; remote is the guess for dotted public names.
+    // A name that does not resolve keeps the literal guess; public is the guess for dotted names.
     const location = classifyAddresses(addresses, literal);
     this.locations.set(host, { location, at: this.now() });
     return location;
@@ -142,7 +183,7 @@ export class ConnectionBook {
       label: connectionLabel(connection),
       host: hostOf(connection.baseUrl),
       location,
-      mine: ownerOf(connection, location) === "mine",
+      selfHosted: hostingOf(connection) === "self-hosted",
       secrets: { ...flags, ...(this.vault.boundElsewhere(connection.id, connection.baseUrl) ? { elsewhere: true } : {}) },
     };
   }
@@ -185,12 +226,15 @@ export class ConnectionBook {
     return { ...connection };
   }
 
-  /** Lists a runtime at its default address: detected, or added by the person from the menu. */
-  addBuiltin(id: RuntimeId, manual: boolean): Connection | undefined {
+  /**
+   * Lists a runtime: added by the person from the menu at its default address, or found running and confirmed
+   * by its own endpoints, at the address it answered on.
+   */
+  addBuiltin(id: RuntimeId, manual: boolean, baseUrl?: string): Connection | undefined {
     const file = this.load();
     if (!isBuiltinId(id) || file.connections.some((item) => item.id === id)) return undefined;
     if (!manual && file.dismissed.includes(id)) return undefined;
-    const connection = defaultConnection(id);
+    const connection = { ...defaultConnection(id), ...(baseUrl ? { baseUrl } : {}) };
     file.connections.push(connection);
     file.dismissed = file.dismissed.filter((item) => item !== id);
     this.save();
@@ -211,7 +255,8 @@ export class ConnectionBook {
         baseUrl: pick("baseUrl"),
         name: pick("name"),
         concurrency: pick("concurrency"),
-        owner: pick("owner"),
+        hosting: pick("hosting"),
+        declined: pick("declined"),
       }),
     };
     // A new address must meet the HTTPS rule. A saved one that does not can still be renamed or marked,
@@ -262,6 +307,7 @@ function clean(fields: ConnectionFields): Omit<Connection, "id"> {
     baseUrl: fields.baseUrl.trim().replace(/\/+$/, ""),
     ...(name ? { name } : {}),
     ...(fields.concurrency && fields.concurrency >= 1 && fields.concurrency <= 64 ? { concurrency: Math.round(fields.concurrency) } : {}),
-    ...(fields.owner ? { owner: fields.owner } : {}),
+    ...(fields.hosting ? { hosting: fields.hosting } : {}),
+    ...(fields.declined ? { declined: fields.declined } : {}),
   };
 }

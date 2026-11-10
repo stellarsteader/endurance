@@ -88,8 +88,6 @@ export function ChatTitleBar({
 }) {
   const { statuses } = useStore();
   const activeStatus = statuses[thread.id];
-  const running = Object.values(statuses).filter((s) => s === "streaming").length;
-  const awaiting = Object.values(statuses).filter((s) => s === "awaiting").length;
 
   return (
     <header className="desktop-drag flex h-10 shrink-0 select-none items-center gap-0.5 px-3">
@@ -99,22 +97,6 @@ export function ChatTitleBar({
         <span className="truncate font-medium text-[13px]">{thread.title}</span>
         {activeStatus === "streaming" && <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-sky-500" />}
       </div>
-      {(running > 0 || awaiting > 0) && (
-        <div className="mr-2 flex items-center gap-2 text-xs">
-          {running > 0 && (
-            <span className="flex items-center gap-1.5 rounded-full bg-sky-500/10 px-2 py-0.5 text-sky-600 dark:text-sky-300">
-              <span className="size-1.5 animate-pulse rounded-full bg-sky-500" />
-              {running} running
-            </span>
-          )}
-          {awaiting > 0 && (
-            <span className="flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-600 dark:text-amber-300">
-              <span className="size-1.5 rounded-full bg-amber-500" />
-              {awaiting} waiting for you
-            </span>
-          )}
-        </div>
-      )}
       {end}
     </header>
   );

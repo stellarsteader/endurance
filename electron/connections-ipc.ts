@@ -2,15 +2,16 @@
  * Connections IPC. The main process owns every saved connection: the renderer names one by ID, sees only
  * whether secrets exist, and receives the list and catalog as pushed snapshots.
  */
-import { BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
-import { detectRuntimes, discoverModels, inspectServer, probeRuntime } from "../src/harness/runtime";
+import { discoverModels, inspectServer, probeRuntime } from "../src/harness/runtime";
+import { DEFAULT_ADDRESSES, findServers, identifyServer } from "../src/harness/server-identity";
 import {
   connectionState,
   HTTPS_REQUIRED,
   InsecureAddressError,
   isBuiltinId,
-  isOwner,
+  isHosting,
   parseServerInput,
   plainHttpRefusal,
   requireSecureAddress,
@@ -18,11 +19,13 @@ import {
   type LegacySettings,
 } from "../src/lib/connections";
 import { sameAddress } from "../src/lib/connection-vault";
-import { isRuntimeId, type RuntimeConnection } from "../src/lib/models";
-import type { CatalogResult, ConnectionEdit, ConnectionTest, RuntimeProbe, ServerCheck, ServerDraft } from "../src/lib/desktop";
+import { isRuntimeId, PRIMARY_RUNTIMES, RUNTIMES, type RuntimeConnection, type RuntimeId } from "../src/lib/models";
+import type { CatalogResult, ConnectionEdit, ConnectionTest, FoundServer, RuntimeProbe, ServerCheck, ServerDraft } from "../src/lib/desktop";
+import type { Connection } from "../src/lib/connections";
 import { validHeaders, validQuery, vault } from "./connection-secrets";
 import { book } from "./connection-store";
 import { vllmServerInfo, type ServerInfo } from "../src/harness/server-info";
+import { measuredOn } from "../src/harness/ollama-parallel";
 
 type Trust = (event: IpcMainInvokeEvent | IpcMainEvent) => void;
 
@@ -30,6 +33,27 @@ const catalog = new Map<string, CatalogResult>();
 // A starting server is checked again on its own, slower each time, until it answers or fails otherwise.
 const RECHECK_SECONDS = [5, 10, 20, 30, 60];
 const rechecks = new Map<string, { timer: ReturnType<typeof setTimeout>; attempt: number }>();
+/** What each server named itself as, and at which address. Asked again only when that may have changed. */
+const identities = new Map<string, { baseUrl: string; identified: RuntimeId | "unknown" }>();
+
+/**
+ * The runtime the server's own endpoints name. Asked when it answers at a new address or answers again after
+ * being away, since another runtime may have taken the port in between; otherwise the last answer stands.
+ */
+async function identityOf(id: string, resolved: NonNullable<ReturnType<typeof book.resolve>>, answeredBefore: boolean) {
+  const known = identities.get(id);
+  if (known && answeredBefore && sameAddress(known.baseUrl, resolved.connection.baseUrl)) return known.identified;
+  const identified = (await identifyServer(resolved.value)) ?? "unknown";
+  identities.set(id, { baseUrl: resolved.connection.baseUrl, identified });
+  return identified;
+}
+
+/** A found address only if it is one of the default addresses Endurance scans, never one the renderer made up. */
+function foundAddress(value: unknown) {
+  const address = typeof value === "string" ? DEFAULT_ADDRESSES.find((item) => sameAddress(item, value)) : undefined;
+  if (!address) throw new Error("Unknown address");
+  return address;
+}
 
 function broadcast(channel: string, payload: unknown) {
   for (const window of BrowserWindow.getAllWindows()) if (!window.webContents.isDestroyed()) window.webContents.send(channel, payload);
@@ -82,11 +106,13 @@ async function check(id: string, rescheduling = true) {
     return;
   }
   const location = await book.locate(resolved.connection.baseUrl);
+  const answeredBefore = catalog.get(id)?.state === "connected";
   const result = await discoverModels(resolved.runtime, resolved.value, { connectionId: id, label: resolved.label, location });
   // Ended compares with history from before this answer.
   const state = connectionState(result, resolved.connection);
   if (state === "connected") book.markConnected(id);
-  catalog.set(id, { ...result, state });
+  const identified = state === "connected" ? await identityOf(id, resolved, answeredBefore) : undefined;
+  catalog.set(id, { ...result, state, ...(identified ? { identified } : {}) });
   if (rescheduling) schedule(id, state === "starting");
 }
 
@@ -125,16 +151,37 @@ function readDraft(draft: ServerDraft) {
     ...(Object.keys(headers).length ? { headers } : {}),
     ...(query ? { query } : {}),
   };
-  return { connection, name: typeof draft.name === "string" ? draft.name.trim().slice(0, 80) : "", concurrency: optionalNumber(draft.concurrency, 1, 64) };
+  const runtime = isRuntimeId(draft.runtime) && isBuiltinId(draft.runtime) ? draft.runtime : undefined;
+  return { connection, runtime, name: typeof draft.name === "string" ? draft.name.trim().slice(0, 80) : "", concurrency: optionalNumber(draft.concurrency, 1, 64) };
+}
+
+/** A typed address without a path gets the runtime's API path, such as /v1, so a server not running yet is saved where it will answer. */
+function withRuntimePath(baseUrl: string, runtime: RuntimeId) {
+  const fallback = RUNTIMES.find((item) => item.id === runtime)?.baseUrl;
+  try {
+    const url = new URL(baseUrl);
+    if (url.pathname.replace(/\/+$/, "") || !fallback) return baseUrl.replace(/\/+$/, "");
+    return `${url.origin}${new URL(fallback).pathname}`.replace(/\/+$/, "");
+  } catch {
+    return baseUrl;
+  }
 }
 
 async function checkServer(draft: ServerDraft, save: boolean): Promise<ServerCheck> {
-  const { connection, name, concurrency } = readDraft(draft);
-  const inspection = await inspectServer(connection);
+  const { connection, runtime, name, concurrency } = readDraft(draft);
+  const asked = await inspectServer(connection);
+  // A chosen runtime is the person's call: it is saved as that runtime, also before the server runs, so its
+  // setup steps can show. Its row then offers the runtime the server names, if that differs.
+  const inspection = runtime ? { ...asked, kind: runtime, baseUrl: asked.probe.ok || asked.probe.reason === "starting" ? asked.baseUrl : withRuntimePath(connection.baseUrl, runtime) } : asked;
   const listed = book.list().find((item) => sameAddress(item.baseUrl, inspection.baseUrl));
   if (listed) return { ...inspection, duplicate: book.view(listed).label };
-  if (!save || !(inspection.probe.ok || inspection.probe.reason === "starting")) return inspection;
-  const added = book.add({ kind: inspection.kind, baseUrl: inspection.baseUrl, name, concurrency });
+  const answered = inspection.probe.ok || inspection.probe.reason === "starting";
+  // A refused address, an invalid one or a missing key is never saved, chosen runtime or not.
+  const blocked = inspection.probe.reason === "insecure" || inspection.probe.reason === "address" || inspection.probe.reason === "auth";
+  if (!save || (runtime ? blocked : !answered)) return inspection;
+  const builtin = runtime ? book.addBuiltin(runtime, true, inspection.baseUrl) : undefined;
+  // A builtin row starts with the runtime's defaults, so a typed name is set on it after.
+  const added = builtin ? (name ? book.update(builtin.id, { name }) : builtin) : book.add({ kind: inspection.kind, baseUrl: inspection.baseUrl, name, concurrency });
   vault.save(
     added.id,
     added.baseUrl,
@@ -158,14 +205,78 @@ export function registerConnectionsIPC(trusted: Trust) {
     trusted(event);
     return refresh(typeof connectionId === "string" && book.get(connectionId) ? [connectionId] : undefined);
   });
-  ipcMain.handle("connections:detect", async (event) => {
+  // A server whose own endpoints confirm a runtime is listed as that runtime, unless the person removed it
+  // before. Every other one is only suggested: the port alone does not say what it is.
+  ipcMain.handle("connections:detect", async (event): Promise<FoundServer[]> => {
     trusted(event);
-    const listed = [...book.list().map((item) => item.id).filter(isBuiltinId), ...book.dismissed()];
-    const found = await detectRuntimes(listed);
-    const added = found.map((id) => book.addBuiltin(id, false)).filter((item) => item !== undefined);
-    if (!added.length) return;
+    const listed = book.list();
+    const ignored = book.ignored();
+    const found = await findServers((baseUrl) => listed.some((item) => sameAddress(item.baseUrl, baseUrl)) || ignored.some((item) => sameAddress(item, baseUrl)));
+    const added: Connection[] = [];
+    const suggested: FoundServer[] = [];
+    for (const server of found) {
+      const connection = server.confirmed && isBuiltinId(server.kind) ? book.addBuiltin(server.kind, false, server.baseUrl) : undefined;
+      if (connection) added.push(connection);
+      else suggested.push(server);
+    }
+    if (added.length) {
+      await pushConnections();
+      await refresh(added.map((item) => item.id));
+    }
+    return suggested;
+  });
+  ipcMain.handle("connections:add-found", async (event, baseUrl: unknown) => {
+    trusted(event);
+    const address = foundAddress(baseUrl);
+    if (book.list().some((item) => sameAddress(item.baseUrl, address))) return undefined;
+    // Asked again here: the suggestion may be stale, and only this process decides what a server is.
+    const [server] = await findServers((item) => item !== address);
+    if (!server) throw new Error("The server at this address is no longer answering.");
+    const builtin = server.confirmed && isBuiltinId(server.kind) ? book.addBuiltin(server.kind, true, address) : undefined;
+    const added = builtin ?? book.add({ kind: server.kind, baseUrl: address });
     await pushConnections();
-    await refresh(added.map((item) => item.id));
+    void refresh([added.id]);
+    return book.view(added);
+  });
+  ipcMain.handle("connections:ignore-found", (event, baseUrl: unknown) => {
+    trusted(event);
+    book.ignore(foundAddress(baseUrl));
+  });
+  // The person's choice of runtime stands until they switch: a fingerprint can be shared by related servers,
+  // so the identified runtime is offered, never applied on its own.
+  ipcMain.handle("connections:switch-identified", async (event, id: unknown) => {
+    trusted(event);
+    const current = validConnectionId(id) ? book.get(id) : undefined;
+    const identified = current ? identities.get(current.id)?.identified : undefined;
+    if (!current || !identified || identified === "unknown" || identified === current.kind || PRIMARY_RUNTIMES.includes(current.id as RuntimeId))
+      throw new Error("This server has no other runtime to switch to.");
+    const next = book.retype(current.id, identified);
+    if (next.id !== current.id) {
+      // The key, headers and signed query saved for this address go with it.
+      const secrets = vault.apply(current.id, { baseUrl: current.baseUrl, apiKey: "" });
+      vault.save(
+        next.id,
+        next.baseUrl,
+        secrets.apiKey ? { replace: secrets.apiKey } : { keep: true },
+        secrets.headers ? { replace: secrets.headers } : { keep: true },
+        secrets.query ? { replace: secrets.query } : { keep: true },
+      );
+      vault.remove(current.id);
+      catalog.delete(current.id);
+      schedule(current.id, false);
+    }
+    identities.delete(current.id);
+    await pushConnections();
+    await refresh([next.id]);
+    return book.view(book.get(next.id)!);
+  });
+  ipcMain.handle("connections:keep-runtime", async (event, id: unknown) => {
+    trusted(event);
+    const current = validConnectionId(id) ? book.get(id) : undefined;
+    const identified = current ? identities.get(current.id)?.identified : undefined;
+    if (!current || !identified || identified === "unknown") return;
+    book.update(current.id, { declined: identified });
+    await pushConnections();
   });
   ipcMain.handle("connections:add-runtime", async (event, id: unknown) => {
     trusted(event);
@@ -199,9 +310,11 @@ export function registerConnectionsIPC(trusted: Trust) {
       if (inspection.probe.ok) kind = inspection.kind;
     }
     const patch: Parameters<typeof book.update>[1] = { baseUrl, kind };
+    // A choice not to switch was about the server at the old address.
+    if (moved) patch.declined = undefined;
     if ("name" in edit) patch.name = typeof edit.name === "string" ? edit.name : undefined;
     if ("concurrency" in edit) patch.concurrency = optionalNumber(edit.concurrency, 1, 64);
-    if ("owner" in edit) patch.owner = isOwner(edit.owner) ? edit.owner : undefined;
+    if ("hosting" in edit) patch.hosting = isHosting(edit.hosting) && edit.hosting !== "self-hosted" ? edit.hosting : undefined;
     const updated = book.update(id, patch);
     if (moved && edit.moveSecrets) vault.rebind(id, updated.baseUrl);
     if (edit.apiKey || edit.headers) vault.save(id, updated.baseUrl, edit.apiKey ?? { keep: true }, edit.headers ?? { keep: true });
@@ -215,7 +328,14 @@ export function registerConnectionsIPC(trusted: Trust) {
     // A refused address has no details to show; its row already says why.
     const resolved = validConnectionId(id) && !plainHttpRefusal(book.get(id)?.baseUrl ?? "") ? book.resolve(id) : undefined;
     if (!resolved || resolved.runtime !== "vllm") return undefined;
-    return vllmServerInfo(resolved.value, book.view(resolved.connection).mine);
+    return vllmServerInfo(resolved.value, book.view(resolved.connection).selfHosted);
+  });
+  // The worker keeps these in the app's data folder (src/harness/ollama-parallel); read here for the settings.
+  ipcMain.handle("connections:ollama-measured", (event, id: unknown) => {
+    trusted(event);
+    const connection = validConnectionId(id) ? book.get(id) : undefined;
+    if (connection?.kind !== "ollama") return [];
+    return measuredOn(app.getPath("userData"), connection.baseUrl);
   });
   ipcMain.handle("connections:reorder", async (event, ids: unknown) => {
     trusted(event);
@@ -229,6 +349,7 @@ export function registerConnectionsIPC(trusted: Trust) {
     if (!validConnectionId(id)) throw new Error("Unknown server");
     book.remove(id);
     catalog.delete(id);
+    identities.delete(id);
     schedule(id, false);
     await pushConnections();
     broadcast("catalog:changed", ordered());

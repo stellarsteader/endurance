@@ -18,7 +18,7 @@ import {
   DownloadRegistry,
   validDisplay,
 } from "../src/features/model-settings/download-registry";
-import { validConnectionId } from "../src/lib/connections";
+import { hostingOf, validConnectionId, type Connection } from "../src/lib/connections";
 import { managerDelete, managerDownload, managerDownloads, managerInfo, managerLogs, managerModels, managerPlan, managerStart, managerStop } from "../src/features/model-settings/manager-client";
 import { hfToken } from "./hf-token";
 import type { RuntimeId, ServerLocation } from "../src/lib/models";
@@ -31,10 +31,10 @@ import type {
   RuntimeTarget,
 } from "../src/features/model-settings/types";
 
-/** Hardware facts describe Ollama only when it runs on this computer. */
+/** Hardware facts describe Ollama only when it runs on localhost. */
 function ollamaHost(location: ServerLocation): OllamaHost {
   return {
-    local: location === "this-computer",
+    local: location === "loopback",
     platform: process.platform,
     // An x64 build under Rosetta still runs on Apple silicon.
     appleSilicon:
@@ -52,8 +52,16 @@ interface Resolved extends RuntimeTarget {
 export function registerModelSettingsIPC(
   trusted: (event: IpcMainInvokeEvent | IpcMainEvent) => void,
   beforeMutation: () => void,
-  resolve: (connectionId: string) => { runtime: RuntimeId; value: RuntimeTarget["connection"]; label: string; location: ServerLocation } | undefined,
+  resolve: (connectionId: string) => { runtime: RuntimeId; value: RuntimeTarget["connection"]; label: string; location: ServerLocation; connection: Connection } | undefined,
 ) {
+  // Hosting is the person's permission line: on a third-party provider Endurance only sends requests. Checked here,
+  // not only in the window, so nothing the renderer asks can change models there.
+  function changeable(target: ConnectionTarget): Resolved {
+    const found = target && validConnectionId(target.connectionId) ? resolve(target.connectionId) : undefined;
+    if (found && hostingOf(found.connection) === "third-party")
+      throw new Error("Endurance doesn't change models on a third-party provider. Set its Hosting to Self-hosted in Settings → Connections to manage them.");
+    return boundTarget(target);
+  }
   // The renderer names a connection; its address and secrets come from the main process's saved copy.
   function boundTarget(target: ConnectionTarget): Resolved {
     const found = target && validConnectionId(target.connectionId) ? resolve(target.connectionId) : undefined;
@@ -88,7 +96,7 @@ export function registerModelSettingsIPC(
     (event, target: ConnectionTarget, modelId: string) => {
       trusted(event);
       const bound = boundTarget(target);
-      return modelDetails(bound, modelId).then((details) => (bound.location === "this-computer" ? { ...details, hostMemory: totalmem() } : details));
+      return modelDetails(bound, modelId).then((details) => (bound.location === "loopback" ? { ...details, hostMemory: totalmem() } : details));
     },
   );
   ipcMain.handle(
@@ -104,9 +112,9 @@ export function registerModelSettingsIPC(
       // The renderer only changes a model's context or deletes it; the runtime loads models as requests need them.
       if (action !== "context" && action !== "delete") throw new Error("Invalid model operation");
       beforeMutation();
-      if (action === "delete") return deleteModel(boundTarget(target), modelId);
+      if (action === "delete") return deleteModel(changeable(target), modelId);
       if (typeof context !== "number") throw new Error("Choose a context window");
-      return mutateModel(boundTarget(target), modelId, action, context);
+      return mutateModel(changeable(target), modelId, action, context);
     },
   );
   ipcMain.handle(
@@ -156,7 +164,7 @@ export function registerModelSettingsIPC(
     "models:hf-download",
     (event, id: string, input: HFDownloadRequest, display: unknown) => {
       trusted(event);
-      const target = { ...boundTarget(input), connectionId: input.connectionId };
+      const target = { ...changeable(input), connectionId: input.connectionId };
       const request = { repository: input?.repository, filename: input?.filename, runtime: target.runtime, connection: target.connection };
       startDownload(event, id, target, display, (progress, signal) =>
         downloadHuggingFace(request, progress, signal),
@@ -185,7 +193,7 @@ export function registerModelSettingsIPC(
     "models:ollama-pull",
     (event, id: string, input: OllamaPullRequest, display: unknown) => {
       trusted(event);
-      const target = { ...boundTarget(input), connectionId: input.connectionId };
+      const target = { ...changeable(input), connectionId: input.connectionId };
       startDownload(event, id, target, display, (progress, signal) =>
         pullOllama({ model: input?.model, runtime: target.runtime, connection: target.connection }, progress, signal),
       );
@@ -204,9 +212,9 @@ export function registerModelSettingsIPC(
     const task = active.get(id);
     if (task?.owner === event.sender) task.controller.abort();
   });
-  // The vLLM manager on a server the person runs (server/). Starting, stopping and deleting wait for replies to end.
+  // The vLLM manager on a self-hosted server (server/). Starting, stopping and deleting wait for replies to end.
   const managed = (target: ConnectionTarget) => {
-    const bound = boundTarget(target);
+    const bound = changeable(target);
     if (bound.runtime !== "vllm") throw new Error("Only a vLLM connection can be a managed server.");
     return bound.connection;
   };

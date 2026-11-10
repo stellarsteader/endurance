@@ -18,7 +18,9 @@ import {
   ackBytes,
   openOptions,
   pickShell,
+  refusalReader,
   roomFor,
+  sameBlock,
   terminalCwd,
   terminalLaunch,
   validProjectId,
@@ -29,7 +31,7 @@ import {
   type HostRequest,
   type Launch,
 } from "../src/harness/terminal";
-import type { TerminalAttach, TerminalEvent, TerminalInfo, TerminalMode } from "../src/lib/terminal-api";
+import type { TerminalAttach, TerminalBlock, TerminalEvent, TerminalInfo, TerminalMode } from "../src/lib/terminal-api";
 
 type Trusted = (event: IpcMainInvokeEvent | IpcMainEvent) => void;
 
@@ -40,6 +42,8 @@ interface Open {
   attached: boolean;
   /** A sandboxed terminal's temporary folder, removed once its shell is gone. */
   tmp?: string;
+  /** A sandboxed terminal's reader of what its sandbox refused (src/harness/terminal refusalReader). */
+  refusals?: (data: string) => TerminalBlock | undefined;
 }
 
 const terminals = new Map<string, Open>();
@@ -113,6 +117,12 @@ function terminalHost() {
       removeTemp(ending.get(event.id));
       ending.delete(event.id);
       return;
+    }
+    // Read whether or not a window shows the terminal, so a refusal is there when it does.
+    const blocked = event.type === "data" ? open?.refusals?.(event.data) : undefined;
+    if (open && blocked && !sameBlock(blocked, open.info.blocked)) {
+      open.info.blocked = blocked;
+      toOwner(open, { id: event.id, type: "blocked", blocked });
     }
     if (open?.attached) toOwner(open, event);
   });
@@ -235,7 +245,7 @@ async function openTerminal(event: IpcMainInvokeEvent, projectId: unknown, value
   const info: TerminalInfo = { id, projectId, title: path.basename(shell), cwd, mode, network: mode === "full" || options.network };
   const child = terminalHost();
   watch(event.sender);
-  terminals.set(id, { info, owner: event.sender, attached: false, tmp });
+  terminals.set(id, { info, owner: event.sender, attached: false, tmp, ...(mode === "sandboxed" ? { refusals: refusalReader(home, options.network) } : {}) });
   try {
     // Listed once the terminal process says the shell started.
     await new Promise<void>((resolve, reject) => {

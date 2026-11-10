@@ -177,8 +177,8 @@ export function HuggingFaceSettings() {
   const downloads = useDownloads();
   const downloading = (key: string) => downloads.find((entry) => entry.key === key);
   const shown = library ? [library.id] : results.map((model) => model.id);
-  // Any connected server whose own API installs models, wherever it runs.
-  const targets = connections.filter((item) => DOWNLOAD_RUNTIMES.includes(item.kind) && runtimeCatalog.some((entry) => entry.connectionId === item.id && !entry.error));
+  // Any connected self-hosted server whose own API installs models, wherever it runs.
+  const targets = connections.filter((item) => item.selfHosted && DOWNLOAD_RUNTIMES.includes(item.kind) && runtimeCatalog.some((entry) => entry.connectionId === item.id && !entry.error));
   const destination = targets.find((item) => item.id === targetId) ?? targets[0];
   // Ollama tags go to the chosen server when it is Ollama, else to the first Ollama listed.
   const ollama = destination?.kind === "ollama" ? destination : targets.find((item) => item.kind === "ollama");

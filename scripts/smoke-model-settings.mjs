@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { _electron as electron, expect } from "@playwright/test";
 
 const profile = await mkdtemp(join(tmpdir(), "endurance-model-settings-"));
-// HTTPS because only this computer may be reached over plain http://.
+// HTTPS because only localhost may be reached over plain http://.
 const base = "https://fixture.endurance.invalid";
 // Same shape as the Ollama registry config for qwen3.5:4b-mlx; served only by the fixture below.
 const libraryConfig = JSON.stringify({

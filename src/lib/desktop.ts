@@ -5,7 +5,7 @@ import type { CompactionData } from "./types";
 import type { FileUndo, UndoResult } from "./file-undo";
 import type { ChatExportFormat } from "./chat-export";
 import type { ServerInfo } from "../harness/server-info";
-import type { ConnectionState, ConnectionView, LegacySettings, ServerOwner } from "./connections";
+import type { ConnectionState, ConnectionView, LegacySettings, ServerHosting } from "./connections";
 
 export interface CatalogResult {
   connectionId: string;
@@ -18,6 +18,21 @@ export interface CatalogResult {
   detected?: RuntimeProbe["detected"];
   /** Set by the main process from the result and the connection's history. */
   state?: ConnectionState;
+  /**
+   * The runtime the server's own endpoints name, or "unknown" when none does. Read when the server answers at
+   * a new address or answers again after being away, since another runtime may have taken the port.
+   */
+  identified?: RuntimeId | "unknown";
+}
+/** A server answering at a runtime's default address on localhost that is not listed yet. */
+export interface FoundServer {
+  baseUrl: string;
+  /** The runtime its own endpoints confirm, else "openai". */
+  kind: RuntimeId;
+  confirmed: boolean;
+  models: number;
+  /** It asked for an API key, so neither its runtime nor its models could be read. */
+  needsKey?: boolean;
 }
 /**
  * Why a runtime did not answer, from the transport error or HTTP status. "starting" is 502/503/504;
@@ -69,6 +84,11 @@ export interface ServerDraft {
   headers?: Record<string, string>;
   name?: string;
   concurrency?: number;
+  /**
+   * The runtime the person chose from Add server. It is saved as that runtime even when the server is not
+   * running yet; the server is still asked what it is, and a different answer is offered on its row.
+   */
+  runtime?: RuntimeId;
 }
 export interface ServerCheck {
   probe: RuntimeProbe;
@@ -84,8 +104,8 @@ export interface ConnectionEdit {
   baseUrl?: string;
   name?: string;
   concurrency?: number;
-  /** Whether the person runs the server; null goes back to what the address suggests. */
-  owner?: ServerOwner | null;
+  /** Self-hosted or third-party; null goes back to the default, self-hosted. */
+  hosting?: ServerHosting | null;
   apiKey?: SecretChange<string>;
   headers?: SecretChange<Record<string, string>>;
   /** Send the secrets saved for the previous address to the new one. */
@@ -106,8 +126,19 @@ export interface DesktopAPI {
   /** Checks every connection, or only the one named, and returns all their models; also pushed after automatic re-checks. */
   catalog(connectionId?: string): Promise<CatalogResult[]>;
   onCatalog(listener: (catalog: CatalogResult[]) => void): () => void;
-  /** Lists runtimes found at their default addresses, except ones the person removed. */
-  detect(): Promise<void>;
+  /**
+   * Looks for servers at the runtimes' default addresses. One whose own endpoints confirm a runtime is listed
+   * as that runtime, unless the person removed it before. The rest are returned as suggestions.
+   */
+  detect(): Promise<FoundServer[]>;
+  /** Lists a found server: as its runtime when confirmed, else as an OpenAI-compatible server. */
+  addFound(baseUrl: string): Promise<ConnectionView | undefined>;
+  /** Stops suggesting a found server at this address. */
+  ignoreFound(baseUrl: string): Promise<void>;
+  /** Sets a connection up as the runtime its server identified as. Returns the connection, which may have a new ID. */
+  switchToIdentified(id: string): Promise<ConnectionView>;
+  /** Keeps the connection's runtime although its server identified as another; asks again only for a different one. */
+  keepRuntime(id: string): Promise<void>;
   /** Lists a runtime at its default address, chosen from Add server. */
   addRuntime(id: RuntimeId): Promise<void>;
   checkServer(draft: ServerDraft): Promise<ServerCheck>;
@@ -118,6 +149,8 @@ export interface DesktopAPI {
   reorderConnections(ids: string[]): Promise<void>;
   /** A vLLM server's load and cache, for display; undefined for other runtimes. */
   serverInfo(id: string): Promise<ServerInfo | undefined>;
+  /** What was last measured for each model of an Ollama connection: replies it wrote at once, up to `cap`. */
+  ollamaMeasured(id: string): Promise<{ model: string; cap: number; served: number }[]>;
   /** Removes a server with its saved key, headers and signed query. */
   removeConnection(id: string): Promise<void>;
   testConnection(id: string, test: ConnectionTest): Promise<RuntimeProbe>;

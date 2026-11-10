@@ -11,9 +11,9 @@
  *   window has more than a megabyte it has not drawn.
  */
 import path from "node:path";
-import { MAX_TERMINALS, MAX_WRITE, type TerminalMode } from "../lib/terminal-api";
+import { MAX_TERMINALS, MAX_WRITE, type TerminalBlock, type TerminalMode } from "../lib/terminal-api";
 import type { WorkspacePolicy } from "../lib/workspace-policy";
-import { sandboxProfile, type SandboxPaths } from "./shell";
+import { refusedHomePaths, sandboxProfile, triedNetwork, type SandboxPaths } from "./shell";
 
 export { MAX_TERMINALS, MAX_WRITE };
 /** Output kept per terminal and replayed when a window attaches again. */
@@ -53,6 +53,37 @@ export const ackBytes = (value: unknown) => (typeof value === "number" && Number
 
 /** Whether another terminal may open in a project that has `running` open. */
 export const roomFor = (running: number) => running < MAX_TERMINALS;
+
+// ---------------------------------------------------------------------------- what the sandbox refused
+
+/** Color, cursor and title sequences, which split the words an error line is matched by. */
+const ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
+/** The most of an unfinished line kept between chunks of output. */
+const PARTIAL = 2000;
+
+/**
+ * Reads a sandboxed terminal's output line by line for what its sandbox refused, with the checks the agent's
+ * commands get (refusedHomePaths, triedNetwork). The network counts only when the terminal opened offline; online,
+ * the same errors are the network's own. Returns the last refusal in a chunk. Nothing read is kept or logged.
+ */
+export function refusalReader(home: string, network: boolean) {
+  let partial = "";
+  return (data: string): TerminalBlock | undefined => {
+    const lines = (partial + data).replace(ESCAPE, "").split(/\r\n|\n|\r/);
+    partial = (lines.pop() ?? "").slice(-PARTIAL);
+    let found: TerminalBlock | undefined;
+    for (const line of lines) {
+      const refused = refusedHomePaths(line, home)[0];
+      if (refused) found = { kind: "path", path: `~${refused.slice(home.length)}` };
+      else if (!network && triedNetwork(line)) found = { kind: "network" };
+    }
+    return found;
+  };
+}
+
+/** Whether two refusals are the same, so one already shown is not sent again. */
+export const sameBlock = (one: TerminalBlock | undefined, other: TerminalBlock | undefined) =>
+  one?.kind === other?.kind && (one?.kind !== "path" || one.path === (other as { path: string }).path);
 
 // ---------------------------------------------------------------------------- launch
 

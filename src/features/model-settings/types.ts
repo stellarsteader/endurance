@@ -55,7 +55,7 @@ export interface RuntimeModelDetails extends MemoryFacts {
   quantization?: string;
   /** A loaded model's size and how much of it sits in GPU memory, in bytes, where the runtime reports it. */
   memory?: { total: number; gpu: number };
-  /** This computer's memory in bytes, set only when the runtime runs here; windows that fit it are suggested. */
+  /** The local machine's memory in bytes, set only when the runtime runs on localhost; windows that fit it are suggested. */
   hostMemory?: number;
   capabilities: string[];
   /** The runtime takes a window for the model (Ollama's Modelfile, LM Studio's load). */

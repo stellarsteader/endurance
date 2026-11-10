@@ -2,7 +2,7 @@
  * What a vLLM server says about its load and memory, for the Connections page. `/metrics` is public on every
  * vLLM server: requests running and waiting, KV cache use, and the cache's configuration as the labels of
  * `vllm:cache_config_info`. A server the person runs may also answer `/server_info`, which vLLM serves only with
- * VLLM_SERVER_DEV_MODE=1 and which carries its whole configuration; it is never asked of an external server.
+ * VLLM_SERVER_DEV_MODE=1 and which carries its whole configuration; it is never asked of a third-party provider.
  * Nothing here is used to decide requests; it is shown.
  */
 import { headers, runtimeUrl, serverRoot, endpoint } from "./runtime";
@@ -86,13 +86,13 @@ export function parseServerInfo(value: unknown): Pick<ServerInfo, "maxNumSeqs" |
   };
 }
 
-export async function vllmServerInfo(connection: RuntimeConnection, mine: boolean, transport: typeof fetch = fetch): Promise<ServerInfo> {
+export async function vllmServerInfo(connection: RuntimeConnection, selfHosted: boolean, transport: typeof fetch = fetch): Promise<ServerInfo> {
   const root = serverRoot(endpoint(connection));
   const get = (route: string) =>
     transport(runtimeUrl(connection, `${root}${route}`), { headers: headers(connection), redirect: "error", signal: AbortSignal.timeout(5000) }).catch(() => undefined);
-  const [metrics, info] = await Promise.all([get("/metrics"), mine ? get("/server_info?config_format=json") : undefined]);
+  const [metrics, info] = await Promise.all([get("/metrics"), selfHosted ? get("/server_info?config_format=json") : undefined]);
   const parsed = metrics?.ok ? parseMetrics(await metrics.text()) : {};
-  if (!mine) return parsed;
+  if (!selfHosted) return parsed;
   const development = Boolean(info?.ok);
   const config = development ? parseServerInfo(await info!.json().catch(() => ({}))) : {};
   if (!development) void info?.body?.cancel().catch(() => undefined);

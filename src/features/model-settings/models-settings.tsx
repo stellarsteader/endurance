@@ -132,7 +132,8 @@ function ModelEditor({
   const setting = details ? contextSetting(store, details, preference.contextLimit) : undefined;
   // Ollama's setting cannot be taken back to its default from here; a cap can, back to the server's window.
   const contextChanged = context !== setting && (store === "cap" || context !== undefined);
-  const editable = store === "cap" ? Boolean(served) : Boolean(details?.canSetContext);
+  // A cap lives in Endurance; any other window is changed on the server, which only a self-hosted one allows.
+  const editable = store === "cap" ? Boolean(served) : Boolean(details?.canSetContext) && connection.selfHosted;
   // Ollama and LM Studio report capabilities; others leave them to the person.
   const reported = Boolean(model.capabilitiesReported || details?.capabilities.length);
   const canThink =
@@ -207,7 +208,7 @@ function ModelEditor({
       setBusy(false);
     }
   };
-  // What the chosen window would take, where that can be told, against this computer's memory.
+  // What the chosen window would take, where that can be told, against the local machine's memory.
   const reportedMemory = preferencesFor(connection, modelId).reportedMemory;
   const estimate = details && store !== "cap" ? estimateLabel(details, context, reportedMemory) : undefined;
   const memory = details?.hostMemory;
@@ -221,7 +222,7 @@ function ModelEditor({
   const contextHint = loading
     ? "Checking runtime…"
     : !editable
-      ? store === "cap" ? "The server does not report its window" : "Not editable through this runtime"
+      ? store === "cap" ? "The server does not report its window" : !connection.selfHosted ? "Not changed on a third-party provider" : "Not editable through this runtime"
       : store === "cap"
         ? `Up to the ${contextLabel(served!)} the server runs with`
         : context === undefined && store === "runtime"
@@ -276,7 +277,7 @@ function ModelEditor({
       </Field>
       {overMemory && memory && (
         <p className="-mt-2 text-[12px] leading-[1.35] text-amber-700 dark:text-amber-300" role="status">
-          About {formatBytes(estimate!.bytes)} at this length, more than this computer’s {formatBytes(memory)}. It may load slowly on the CPU or fail to load.
+          About {formatBytes(estimate!.bytes)} at this length, more than the {formatBytes(memory)} of system memory. It may load slowly on the CPU or fail to load.
         </p>
       )}
       {reported ? (
@@ -367,7 +368,7 @@ function ModelEditor({
       {confirmDelete ? (
         <div className="flex items-center justify-between gap-3" key="confirm-delete" role="group" aria-label={`Delete ${name}`}>
           <p className="min-w-0 text-[12px] leading-[1.35] text-muted-foreground">
-            Delete {name}? {runtimeName(runtime)} removes the model files from {connection.location === "this-computer" ? "this computer" : connection.host}.
+            Delete {name}? {runtimeName(runtime)} removes the model files from {connection.location === "loopback" ? "local storage" : connection.host}.
           </p>
           <div className="flex shrink-0 items-center gap-2">
             <Button className="h-7 rounded-[6px] text-[12px]" disabled={busy} onClick={() => setConfirmDelete(false)} type="button" variant="ghost">
@@ -405,7 +406,7 @@ function ModelEditor({
           >
             Reset
           </button>
-          {details?.canDelete && (
+          {details?.canDelete && connection.selfHosted && (
             <Button
               className="h-7 rounded-[6px] text-[12px] text-muted-foreground hover:text-destructive"
               disabled={busy || running}
@@ -527,7 +528,7 @@ export function ModelsSettings() {
   const [editing, setEditing] = useState<string | null>(null);
   // Set when a download finishes, wherever it was started from.
   const installed = useInstallFocus();
-  // In catalog order: this computer, then the person's network, then remote servers.
+  // In catalog order: loopback, then the private network, then public servers.
   const connected = runtimeCatalog
     .filter((result) => !result.error)
     .flatMap((result) => {
@@ -535,9 +536,9 @@ export function ModelsSettings() {
       return connection ? [{ connection, models: result.models }] : [];
     });
 
-  // A vLLM server marked as the person's own may be the Endurance manager (server/), which runs its models from here.
+  // A self-hosted vLLM server may be the Endurance manager (server/), which runs its models from here.
   const [managers, setManagers] = useState<Record<string, ManagerInfo | null>>({});
-  const owned = connected.filter(({ connection }) => connection.kind === "vllm" && connection.mine).map(({ connection }) => connection.id);
+  const owned = connected.filter(({ connection }) => connection.kind === "vllm" && connection.selfHosted).map(({ connection }) => connection.id);
   useEffect(() => {
     let cancelled = false;
     for (const id of owned)

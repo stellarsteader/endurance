@@ -138,7 +138,12 @@ export interface CotData {
   steps: CotStep[];
 }
 
-export type SubagentStatus = "queued" | "running" | "done" | "error";
+/**
+ * The worker writes "queued", "running", "done" and "error". It never writes "stopped": the app shows a subagent
+ * as stopped when it is still queued or running in a reply that is no longer streaming, because the reply was
+ * stopped, the worker restarted or the app closed (settleSubagent in lib/derive).
+ */
+export type SubagentStatus = "queued" | "running" | "done" | "error" | "stopped";
 
 export interface SubagentData {
   id: string;
@@ -210,8 +215,13 @@ export type DataTypes = {
   suggestions: { items: string[] };
   toast: { message: string; tone?: "info" | "success" };
   loop: LoopData;
-  /** Sent while the reply waits, never stored: the model is being loaded first, or an attached document is being read. */
-  status: { state: "loading" } | { state: "reading"; file: string; done: number; total: number };
+  /**
+   * Sent while the reply waits, never stored: the model is being loaded first, Ollama keeps it waiting until
+   * another model it runs finishes (`model`), or an attached document is being read.
+   */
+  status: { state: "loading" } | { state: "waiting"; model: string } | { state: "reading"; file: string; done: number; total: number };
+  /** Sent once per pair while the app runs, never stored: Ollama unloaded one model to run the other. */
+  swap: { models: [string, string] };
   /**
    * The runtime named a smaller window than expected; the request was fitted to it and sent again. `runtime` is
    * set when the runtime, asked again, still reports a larger window than the one it refused at.

@@ -18,7 +18,11 @@ export const MODEL_KINDS: { value: ModelKind; label: string }[] = [
 /** The connection a model is served from. */
 export type ModelGroup = string;
 /** Where a server runs, from its address: decides wording and the Remote label, never what is sent. */
-export type ServerLocation = "this-computer" | "network" | "remote";
+/**
+ * Where a server runs, by the address space of its host. "private" also counts Tailscale (100.64.0.0/10 and
+ * *.ts.net), which is shared rather than RFC 1918 space, because it is the person's own network.
+ */
+export type ServerLocation = "loopback" | "private" | "public";
 
 export interface ModelInfo {
   id: string;
@@ -152,7 +156,10 @@ export interface RuntimeConnection {
   apiKey: string;
   /** Extra request headers, such as a hosting provider's access token. Main process only. */
   headers?: Record<string, string>;
-  /** Requests sent to this server at once; unset lets the server decide. Not used for Ollama, which is measured. */
+  /**
+   * Requests sent to this server at once; unset lets the server decide. For Ollama it is per model and unset is
+   * one, Ollama's own default; how many a model really serves under it is measured (src/harness/ollama-parallel).
+   */
   concurrency?: number;
   /** Query parameters from a signed address, such as an access token. Main process only, like headers. */
   query?: string;

@@ -20,7 +20,7 @@ import { hasAttachments, type Reader } from "./attachments";
 import { attachmentId, documentFormat, imageFormat, SENT_IMAGE_FORMATS } from "../lib/attachments";
 import { tuned } from "./sampling";
 import { describeFailure } from "./failure";
-import { runAs } from "./limit";
+import { chatWaits, runAs } from "./limit";
 import type { AppUIMessage, Approval, ChatSettings, Usage } from "../lib/types";
 import type { CompactResult } from "../lib/desktop";
 import { estimateText } from "../lib/token-estimate";
@@ -85,7 +85,7 @@ export interface ChatRequest extends Omit<ChatSettings, "defaultApproval"> {
  * stated fact better than a condition, and the text is the same on every request, so the prompt stays cached.
  */
 /**
- * Today's date on this computer, for every model: one trained long ago otherwise takes its training year for this
+ * Today's date from the system clock, for every model: one trained long ago otherwise takes its training year for this
  * one. The date alone, not the time, so the system prompt changes once a day rather than on every request.
  */
 export function todayNote(now = new Date()) {
@@ -180,10 +180,10 @@ export function identity(body: ChatRequest) {
   const name = typeof body.modelName === "string" && body.modelName.trim() ? body.modelName.trim().slice(0, 80) : body.runtimeModelId;
   const server = runtimeName(body.runtime);
   const host = typeof body.host === "string" && body.host ? body.host.slice(0, 120) : "another machine";
-  // Only a loopback address is this computer; anything else names the host it actually runs on.
-  if (body.location === "remote") return `You are ${name}, a model (${body.runtimeModelId}) served by ${server} on the remote host ${host}, used through the Endurance app.`;
-  if (body.location === "network") return `You are ${name}, a model (${body.runtimeModelId}) served by ${server} on ${host} in the local network, used through the Endurance app.`;
-  return `You are ${name}, a local model (${body.runtimeModelId}) running on this computer through ${server} in the Endurance app.`;
+  // Only a loopback address is local; anything else names the host it actually runs on.
+  if (body.location === "public") return `You are ${name}, a model (${body.runtimeModelId}) served by ${server} on the remote host ${host}, used through the Endurance app.`;
+  if (body.location === "private") return `You are ${name}, a model (${body.runtimeModelId}) served by ${server} on ${host} in the local network, used through the Endurance app.`;
+  return `You are ${name}, a local model (${body.runtimeModelId}) running locally through ${server} in the Endurance app.`;
 }
 export const layer = LLMClient.layer.pipe(Layer.provide(RequestExecutor.fetchLayer));
 export function validate(body: ChatRequest) {
@@ -356,7 +356,7 @@ export async function chatResponse(request: Request) {
     originalMessages: raw.messages,
     onError: describeFailure,
     execute: ({ writer }) =>
-      runAs({ chat: raw.id, kind: "chat" }, async () => {
+      runAs({ chat: raw.id, kind: "chat", ...chatWaits((part) => writer.write(part)) }, async () => {
       writer.write({ type: "start", messageMetadata: { model: raw.model, createdAt: started } });
       // The window the runtime holds now, loading the model first when only loading tells it.
       const body = await withLiveWindow(

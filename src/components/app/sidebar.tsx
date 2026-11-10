@@ -115,8 +115,13 @@ const navRow = cn("h-7 justify-start gap-2 rounded-[6px] px-2 font-normal text-[
 /** A nav row whose page is open, like the Settings button while settings show. */
 const pressedRow =
   "bg-sidebar-accent text-sidebar-accent-foreground hover:bg-sidebar-accent dark:not-aria-expanded:hover:bg-sidebar-accent";
-/** A 24px action inset 2px in a 28px row: 6px row corner − 2px inset. */
-const rowAction = "size-6 rounded-[4px]";
+/**
+ * A 24px action inset 2px in a 28px row: 6px row corner − 2px inset. Its dark hover fill is the ghost button's
+ * muted/50 already laid over the hovered row (sidebar-accent/60 on sidebar), mixed into one opaque color, so it
+ * looks the same but the title under it does not show through.
+ */
+const rowAction =
+  "size-6 rounded-[4px] dark:not-aria-expanded:hover:bg-[color-mix(in_srgb,var(--muted)_50%,color-mix(in_srgb,var(--sidebar-accent)_60%,var(--sidebar)))]";
 
 const toggle = <T,>(list: T[], value: T) =>
   list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
