@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { commandKeys } from "@/lib/command-key";
-import { isToolPart, toolNameOf, type ToolPartLike } from "@/lib/derive";
+import { isToolPart, settleSubagent, toolNameOf, type ToolPartLike } from "@/lib/derive";
 import { approvalExpired, continuesInPlace, interruptionNote, interruptionOf, outcomeUnknown, type InterruptCause, type Interruption } from "@/lib/interrupted";
 import type {
   AppUIMessage,
@@ -304,7 +304,7 @@ function ReasoningStepRow({ step, state, now }: { step: CotStep; state: TraceSta
   return (
     <li>
       <Reasoning className="group mb-0" defaultOpen={state === "running" || state === "waiting"} isStreaming={live}>
-        <ReasoningTrigger className="group/trigger flex w-full items-center gap-2 text-left text-[13px] leading-[1.4]">
+        <ReasoningTrigger className="group/trigger flex h-7 w-full items-center gap-2 rounded-[6px] px-1 text-left text-[13px] leading-[1.4] hover:bg-muted/50">
           <BrainIcon className="size-[15px] shrink-0 text-muted-foreground" />
           <span className="min-w-0 flex-1 truncate">
             {live ? <Shimmer duration={1.2}>{stepTitle(step)}</Shimmer> : <span className="text-foreground/85">{took ? `Thought for ${took}` : stepTitle(step)}</span>}
@@ -312,8 +312,8 @@ function ReasoningStepRow({ step, state, now }: { step: CotStep; state: TraceSta
           {live && <Duration ms={stepElapsed(step, now)} />}
           <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground group-data-[panel-open]/trigger:rotate-90" />
         </ReasoningTrigger>
-        {step.note && <div className="pt-0.5 pl-[23px] text-[12px] leading-[1.35] text-amber-500/90">{step.note}</div>}
-        <ReasoningContent className="mt-1 pb-1 pl-[23px] text-[12.5px] leading-[1.45]">{step.reasoning ?? ""}</ReasoningContent>
+        {step.note && <div className="pt-0.5 pl-[27px] text-[12px] leading-[1.35] text-amber-500/90">{step.note}</div>}
+        <ReasoningContent className="mt-1 pb-1 pl-[27px] text-[12.5px] leading-[1.45]">{step.reasoning ?? ""}</ReasoningContent>
       </Reasoning>
     </li>
   );
@@ -367,14 +367,18 @@ function AgentStepRow({ step, state, now }: { step: CotStep; state: TraceState; 
   const live = step.status === "active" && state === "running";
   const cutOff = step.status === "active" && state === "stopped";
   return (
-    <li className="flex gap-2">
-      <Icon className={cn("mt-[3px] size-[15px] shrink-0", step.kind === "blocked" ? "text-amber-500" : "text-muted-foreground")} />
+    <li className="flex gap-2 px-1">
+      <span className="flex h-7 shrink-0 items-center">
+        <Icon className={cn("size-[15px]", step.kind === "blocked" ? "text-amber-500" : "text-muted-foreground")} />
+      </span>
       <div className="min-w-0 flex-1">
-        <div className="flex items-baseline gap-2">
-          <span className={cn("min-w-0 flex-1 text-[13px] leading-[1.4]", step.status === "complete" && "text-foreground/85")}>
+        <div className="flex items-start gap-2">
+          <span className={cn("min-w-0 flex-1 py-[5px] text-[13px] leading-[1.4]", step.status === "complete" && "text-foreground/85")}>
             {live ? <Shimmer duration={1.2}>{stepTitle(step)}</Shimmer> : stepTitle(step)}
           </span>
-          <Duration ms={stepElapsed(step, live ? now : undefined)} />
+          <span className="flex h-7 shrink-0 items-center">
+            <Duration ms={stepElapsed(step, live ? now : undefined)} />
+          </span>
         </div>
         {(step.note || cutOff) && (step.detail ? <StepDetail detail={step.detail} note={step.note ?? ""} /> : (
           <div className={cn("pt-0.5 text-[12px] leading-[1.35]", cutOff ? "text-muted-foreground" : "text-amber-500/90")}>
@@ -439,11 +443,11 @@ function AgentSteps({ data, streaming, asking, cards }: { data: CotData; streami
         <ChevronRightIcon className={cn("size-3.5 shrink-0 text-muted-foreground", open && "rotate-90")} />
       </button>
       {open ? (
-        <ol className="flex flex-col gap-1 pt-1 pb-2 pl-1">
+        <ol className="flex flex-col gap-1 pt-1 pb-2">
           {data.steps.map((step) => {
             const card = step.card ? cards?.draw(step.card) : undefined;
             return card ? (
-              <li className="-ml-1" key={step.id}>
+              <li key={step.id}>
                 {card}
               </li>
             ) : (
@@ -1196,7 +1200,7 @@ function PacedThought({ text, live }: { text: string; live: boolean }) {
 export function MessageParts({ message, streaming }: { message: AppUIMessage; streaming: boolean }) {
   const parts = message.parts;
   const sources = parts.filter((p): p is Extract<Part, { type: "source-url" }> => p.type === "source-url");
-  const subagents = parts.flatMap((p) => (p.type === "data-subagent" ? [p.data] : []));
+  const subagents = parts.flatMap((p) => (p.type === "data-subagent" ? [settleSubagent(p.data, streaming)] : []));
   const lastTodos = parts.findLastIndex((p) => p.type === "data-todos");
   const firstSource = parts.findIndex((p) => p.type === "source-url");
   const firstAgent = parts.findIndex((p) => p.type === "data-subagent");

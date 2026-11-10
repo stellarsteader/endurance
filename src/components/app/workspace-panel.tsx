@@ -18,7 +18,6 @@ import { deriveWorkspace, type WorkspaceData } from "@/lib/derive";
 import type { WorkspaceTab } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import {
-  BookOpenIcon,
   BotIcon,
   CheckCircle2Icon,
   CircleDashedIcon,
@@ -271,52 +270,16 @@ function AgentLog({ ws }: { ws: WorkspaceData }) {
   );
 }
 
-function SourcesTab({ ws }: { ws: WorkspaceData }) {
-  if (ws.sources.length === 0) {
-    return (
-      <Empty
-        hint="Turn on Search and ask about something current — cited pages are collected here."
-        icon={<BookOpenIcon className="size-6" />}
-        title="No sources"
-      />
-    );
-  }
-  return (
-    <div className="space-y-2 p-3">
-      {ws.sources.map((s, i) => {
-        const host = new URL(s.url).hostname.replace("www.", "");
-        return (
-          <a
-            className="flex items-start gap-3 rounded-xl border bg-background p-3 hover:bg-muted/50"
-            href={s.url}
-            key={s.url}
-            rel="noreferrer"
-            target="_blank"
-          >
-            <span className="mt-0.5 font-mono text-[11px] text-muted-foreground">{i + 1}</span>
-            <img alt="" className="mt-0.5 size-4 rounded" src={`https://www.google.com/s2/favicons?domain=${host}&sz=32`} />
-            <div className="min-w-0">
-              <div className="truncate font-medium text-sm">{s.title}</div>
-              <div className="truncate text-muted-foreground text-xs">{host}</div>
-            </div>
-          </a>
-        );
-      })}
-    </div>
-  );
-}
-
 const TABS: { id: WorkspaceTab; label: string; icon: typeof BotIcon }[] = [
   { id: "agents", label: "Agents", icon: BotIcon },
   { id: "tasks", label: "Tasks", icon: ListChecksIcon },
   { id: "changes", label: "Changes", icon: FileDiffIcon },
   { id: "terminal", label: "Terminal", icon: SquareTerminalIcon },
-  { id: "sources", label: "Sources", icon: BookOpenIcon },
 ];
 
 export function WorkspaceTabList() {
-  const { chat } = useSession();
-  const ws = useMemo(() => deriveWorkspace(chat.messages), [chat.messages]);
+  const { chat, busy } = useSession();
+  const ws = useMemo(() => deriveWorkspace(chat.messages, busy), [chat.messages, busy]);
   const badge: Partial<Record<WorkspaceTab, ReactNode>> = {
     agents: ws.subagents.some((a) => a.status === "running") ? (
       <span className="size-1.5 animate-pulse rounded-full bg-sky-500" />
@@ -324,7 +287,6 @@ export function WorkspaceTabList() {
       <span className="text-[10px] text-muted-foreground">{ws.subagents.length}</span>
     ) : null,
     changes: ws.edits.length ? <span className="text-[10px] text-muted-foreground">{ws.edits.length}</span> : null,
-    sources: ws.sources.length ? <span className="text-[10px] text-muted-foreground">{ws.sources.length}</span> : null,
     terminal: ws.shell.some((s) => s.running) ? <span className="size-1.5 animate-pulse rounded-full bg-amber-500" /> : null,
   };
 
@@ -342,8 +304,8 @@ export function WorkspaceTabList() {
 }
 
 export function WorkspacePanel() {
-  const { agentId, chat } = useSession();
-  const ws = useMemo(() => deriveWorkspace(chat.messages), [chat.messages]);
+  const { agentId, chat, busy } = useSession();
+  const ws = useMemo(() => deriveWorkspace(chat.messages, busy), [chat.messages, busy]);
 
   return (
     <div className="h-full bg-muted/20">
@@ -366,11 +328,6 @@ export function WorkspacePanel() {
       </TabsContent>
       <TabsContent className="h-full" value="terminal">
         <TerminalTab ws={ws} />
-      </TabsContent>
-      <TabsContent className="h-full" value="sources">
-        <ScrollArea className="h-full">
-          <SourcesTab ws={ws} />
-        </ScrollArea>
       </TabsContent>
     </div>
   );

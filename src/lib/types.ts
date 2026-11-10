@@ -138,7 +138,12 @@ export interface CotData {
   steps: CotStep[];
 }
 
-export type SubagentStatus = "queued" | "running" | "done" | "error";
+/**
+ * The worker writes "queued", "running", "done" and "error". It never writes "stopped": the app shows a subagent
+ * as stopped when it is still queued or running in a reply that is no longer streaming, because the reply was
+ * stopped, the worker restarted or the app closed (settleSubagent in lib/derive).
+ */
+export type SubagentStatus = "queued" | "running" | "done" | "error" | "stopped";
 
 export interface SubagentData {
   id: string;

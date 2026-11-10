@@ -7,7 +7,7 @@ import { getModel } from "@/lib/models";
 import { formatElapsed } from "@/lib/trace";
 import type { SubagentData } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { CheckCircle2Icon, ChevronLeftIcon, ChevronRightIcon, CircleDashedIcon, CircleXIcon, LoaderCircleIcon, WrenchIcon } from "lucide-react";
+import { CheckCircle2Icon, ChevronLeftIcon, ChevronRightIcon, CircleDashedIcon, CircleStopIcon, CircleXIcon, LoaderCircleIcon, WrenchIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useSession } from "./session-context";
 
@@ -25,12 +25,15 @@ export function SubagentStatusIcon({ status, className }: { status: SubagentData
   if (status === "done") return <CheckCircle2Icon className={cn("size-4 text-emerald-500", className)} />;
   if (status === "error") return <CircleXIcon className={cn("size-4 text-red-500", className)} />;
   if (status === "running") return <LoaderCircleIcon className={cn("size-4 animate-spin text-sky-500", className)} />;
+  if (status === "stopped") return <CircleStopIcon className={cn("size-4 text-muted-foreground", className)} />;
   return <CircleDashedIcon className={cn("size-4 text-muted-foreground", className)} />;
 }
 
+/** How long it worked: to its end, or to now while it runs. Unknown for one that stopped with its reply. */
 export function elapsedOf(agent: SubagentData, now: number) {
-  if (!agent.startedAt) return 0;
-  return (agent.finishedAt ?? now) - agent.startedAt;
+  if (!agent.startedAt) return undefined;
+  if (agent.finishedAt) return agent.finishedAt - agent.startedAt;
+  return agent.status === "running" ? now - agent.startedAt : undefined;
 }
 
 function statusPlate(status: SubagentData["status"]) {
@@ -57,6 +60,7 @@ function ReadOnlyMark({ agent }: { agent: SubagentData }) {
 function AgentRow({ agent }: { agent: SubagentData }) {
   const { agentId, openAgent } = useSession();
   const now = useNow(agent.status === "running");
+  const elapsed = elapsedOf(agent, now);
   return (
     <button
       className={cn(
@@ -69,10 +73,8 @@ function AgentRow({ agent }: { agent: SubagentData }) {
       <AgentMark status={agent.status} />
       <span className="min-w-0 flex-1 truncate font-medium text-[15px] leading-[1.6]">{agent.name}</span>
       <ReadOnlyMark agent={agent} />
-      {agent.startedAt && (
-        <span className="shrink-0 text-[13px] leading-[1.4] text-muted-foreground tabular-nums">
-          {formatElapsed(elapsedOf(agent, now))}
-        </span>
+      {elapsed !== undefined && (
+        <span className="shrink-0 text-[13px] leading-[1.4] text-muted-foreground tabular-nums">{formatElapsed(elapsed)}</span>
       )}
     </button>
   );
@@ -97,7 +99,7 @@ function AgentGroup({ label, agents, empty }: { label: string; agents: SubagentD
 
 export function AgentList({ agents }: { agents: SubagentData[] }) {
   const active = agents.filter((agent) => agent.status === "running" || agent.status === "queued");
-  const done = agents.filter((agent) => agent.status === "done" || agent.status === "error");
+  const done = agents.filter((agent) => agent.status === "done" || agent.status === "error" || agent.status === "stopped");
   return (
     <div className="flex flex-col gap-6">
       <AgentGroup agents={active} empty="No active agents" label={`Active · ${active.length}`} />
@@ -113,7 +115,8 @@ export function SubagentTrace({ agents }: { agents: SubagentData[] }) {
     <div className="not-prose">
       {agents.map((agent) => {
         const line =
-          agent.status === "running" ? agent.currentStep : agent.status === "queued" ? "Waiting" : agent.result;
+          agent.status === "running" ? agent.currentStep : agent.status === "queued" ? "Waiting" : agent.status === "stopped" ? "Stopped" : agent.result;
+        const elapsed = elapsedOf(agent, now);
         return (
           <button
             className="flex h-7 w-full items-center gap-2 rounded-[6px] px-1 text-left hover:bg-muted/50"
@@ -125,10 +128,8 @@ export function SubagentTrace({ agents }: { agents: SubagentData[] }) {
             <span className="shrink-0 text-[13px] leading-[1.4]">{agent.name}</span>
             <ReadOnlyMark agent={agent} />
             <span className="min-w-0 flex-1 truncate text-[13px] leading-[1.4] text-muted-foreground">{line}</span>
-            {agent.startedAt && (
-              <span className="shrink-0 text-[12px] leading-[1.35] text-muted-foreground tabular-nums">
-                {formatElapsed(elapsedOf(agent, now))}
-              </span>
+            {elapsed !== undefined && (
+              <span className="shrink-0 text-[12px] leading-[1.35] text-muted-foreground tabular-nums">{formatElapsed(elapsed)}</span>
             )}
           </button>
         );
@@ -138,8 +139,8 @@ export function SubagentTrace({ agents }: { agents: SubagentData[] }) {
 }
 
 export function AgentThread() {
-  const { agentId, openAgent, chat, thread } = useSession();
-  const agents = useMemo(() => deriveWorkspace(chat.messages).subagents, [chat.messages]);
+  const { agentId, openAgent, chat, thread, busy } = useSession();
+  const agents = useMemo(() => deriveWorkspace(chat.messages, busy).subagents, [chat.messages, busy]);
   const agent = agents.find((item) => item.id === agentId);
   const now = useNow(agent?.status === "running");
 
@@ -173,6 +174,7 @@ export function AgentThread() {
 function AgentTranscript({ agent, now }: { agent: SubagentData; now: number }) {
   const [open, setOpen] = useState(true);
   const current = agent.status === "running" ? agent.logs.length - 1 : -1;
+  const elapsed = elapsedOf(agent, now);
   const when = agent.finishedAt
     ? new Date(agent.finishedAt).toLocaleString(undefined, { weekday: "long", hour: "numeric", minute: "2-digit" })
     : null;
@@ -184,7 +186,7 @@ function AgentTranscript({ agent, now }: { agent: SubagentData; now: number }) {
         <div>
           <button className="flex items-center gap-2 text-[13px] leading-[1.4] text-muted-foreground" onClick={() => setOpen((value) => !value)} type="button">
             <ChevronRightIcon className={cn("size-3.5", open && "rotate-90")} />
-            Worked for {formatElapsed(elapsedOf(agent, now))}
+            {elapsed !== undefined ? `Worked for ${formatElapsed(elapsed)}` : "Stopped"}
           </button>
           {open && agent.logs.length > 0 && (
             <div className="mt-3 flex flex-col gap-3 pl-6">

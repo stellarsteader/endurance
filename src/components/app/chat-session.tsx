@@ -394,6 +394,12 @@ function useSessionCore({
     chat.sendMessage({ text: next.text, files: next.files, metadata: { note: skippedNote(skipped) } });
   }, [busy, pendingApproval, chat, queue]);
 
+  // A chat is as recent as its last model request. Opening it, or saving what it already holds, leaves its place.
+  useEffect(() => {
+    if (ephemeral || !busy) return;
+    updateThread(thread.id, { updatedAt: Date.now() });
+  }, [ephemeral, busy, thread.id, updateThread]);
+
   const latest = useRef(chat.messages);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -403,7 +409,7 @@ function useSessionCore({
     saveTimer.current = setTimeout(() => {
       saveTimer.current = null;
       const messages = latest.current;
-      const patch: Partial<Thread> = { messages, updatedAt: Date.now() };
+      const patch: Partial<Thread> = { messages };
       const named = firstMessageTitle(messages);
       if (named && (thread.title === "New chat" || thread.title === "Temporary chat") && !thread.temporary) patch.title = named;
       updateThread(thread.id, patch);

@@ -11,6 +11,13 @@ import type {
 } from "./types";
 import { combineChanges, type FileChanges } from "./combined-diff";
 
+/**
+ * A subagent as its reply leaves it: one still saved as running or queued in a reply that is no longer live stopped
+ * with that reply (the app closed, the worker restarted, or the reply was stopped), so it no longer reads as at work.
+ */
+export const settleSubagent = (agent: SubagentData, live: boolean): SubagentData =>
+  live || (agent.status !== "running" && agent.status !== "queued") ? agent : { ...agent, status: "stopped" };
+
 type Part = AppUIMessage["parts"][number];
 
 export type ToolPartLike = Extract<Part, { toolCallId: string }>;
@@ -30,19 +37,19 @@ export interface WorkspaceData {
   edits: FileChanges[];
   shell: { command: string; stdout?: string; exitCode?: number | null; running: boolean; denied?: boolean }[];
   tests?: TestRunOutput;
-  sources: { url: string; title?: string }[];
   usage?: Usage;
   model?: string;
 }
 
-export function deriveWorkspace(messages: AppUIMessage[]): WorkspaceData {
+/** `live`: the chat's last reply is still streaming, so its subagents may still be at work (settleSubagent). */
+export function deriveWorkspace(messages: AppUIMessage[], live = false): WorkspaceData {
   const subagents = new Map<string, SubagentData>();
   const edits = new Map<string, EditFileOutput[]>();
   const shell: WorkspaceData["shell"] = [];
-  const sources = new Map<string, { url: string; title?: string }>();
-  const data: WorkspaceData = { subagents: [], edits: [], shell, sources: [] };
+  const data: WorkspaceData = { subagents: [], edits: [], shell };
 
-  for (const message of messages) {
+  messages.forEach((message, index) => {
+    const current = live && index === messages.length - 1;
     if (message.role === "assistant" && message.metadata?.usage) {
       data.usage = message.metadata.usage;
       data.model = message.metadata.model;
@@ -50,7 +57,7 @@ export function deriveWorkspace(messages: AppUIMessage[]): WorkspaceData {
     for (const part of message.parts) {
       switch (part.type) {
         case "data-subagent":
-          subagents.set(part.data.id, part.data);
+          subagents.set(part.data.id, settleSubagent(part.data, current));
           break;
         case "data-todos":
           data.todos = part.data;
@@ -60,9 +67,6 @@ export function deriveWorkspace(messages: AppUIMessage[]): WorkspaceData {
           break;
         case "data-commit":
           data.commit = part.data;
-          break;
-        case "source-url":
-          sources.set(part.url, { url: part.url, title: part.title });
           break;
         default:
           if (!isToolPart(part)) break;
@@ -83,7 +87,8 @@ export function deriveWorkspace(messages: AppUIMessage[]): WorkspaceData {
                 command: input?.command ?? "",
                 stdout: out?.stdout,
                 exitCode: out?.exitCode,
-                running: part.state === "input-available" || part.state === "approval-responded" || Boolean(out?.running),
+                // A command of a reply that is no longer live is not running, whatever its last saved output says.
+                running: current && (part.state === "input-available" || part.state === "approval-responded" || Boolean(out?.running)),
                 denied: part.state === "output-denied",
               });
             }
@@ -96,17 +101,16 @@ export function deriveWorkspace(messages: AppUIMessage[]): WorkspaceData {
                     ? formatTests(part.output as TestRunOutput)
                     : undefined,
                 exitCode: part.state === "output-available" ? 0 : undefined,
-                running: part.state === "input-available",
+                running: current && part.state === "input-available",
               });
             }
           }
       }
     }
-  }
+  });
 
   data.subagents = [...subagents.values()];
   data.edits = [...edits.values()].map(combineChanges);
-  data.sources = [...sources.values()];
   return data;
 }
 

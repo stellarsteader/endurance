@@ -122,7 +122,7 @@ const idList = (value: unknown) => (Array.isArray(value) ? value.filter((id): id
 
 export type ThreadStatus = "idle" | "streaming" | "awaiting" | "unread" | "error";
 
-export type WorkspaceTab = "agents" | "tasks" | "changes" | "terminal" | "sources";
+export type WorkspaceTab = "agents" | "tasks" | "changes" | "terminal";
 
 export interface AppearanceSettings {
   uiFontSize: number;
