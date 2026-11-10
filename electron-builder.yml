@@ -36,6 +36,7 @@ extraResources:
     to: licenses/endurance-core-LICENSE
 mac:
   category: public.app-category.productivity
+  icon: resources/icons/icon.icns
   # The dmg is for first installs. The zip is what macOS's updater (Squirrel.Mac) installs from, so it is built now
   # and used once releases are signed with a Developer ID. Until then the app only says a new version is out.
   target:
@@ -53,11 +54,14 @@ mac:
 dmg:
   title: Endurance
 win:
+  icon: resources/icons/icon.ico
   target:
     - target: nsis
       arch: [x64]
 linux:
   category: Utility
+  # A folder of NxN.png files. Without it Linux would reuse the macOS icns, which has Apple's wider margins.
+  icon: resources/icons/linux
   target:
     - target: AppImage
       arch: [x64]
