@@ -13,6 +13,7 @@ import {
   type RuntimeId,
 } from "@/lib/models";
 import {
+  classifyHost,
   hostingOf,
   hostOf,
   HTTPS_REQUIRED,
@@ -364,9 +365,75 @@ function SetupGuide({ runtimeId, onEditAddress }: { runtimeId: RuntimeId; onEdit
   );
 }
 
-const CONCURRENCY = [0, 1, 2, 4];
-/** Unset, a server takes what it can. Ollama's is measured per model instead (src/harness/ollama-parallel), so it has no row. */
-const concurrencyLabel = (value: number) => (value ? String(value) : "Server decides");
+/** The most requests at once a connection saves (connection-book and connections-ipc check the same). */
+const MAX_CONCURRENCY = 64;
+
+/**
+ * A whole number of requests at once, or empty for the fallback the placeholder names: the server decides,
+ * or for Ollama one, its own default for OLLAMA_NUM_PARALLEL. Any number fits, since the right one depends on
+ * the server's memory and window, so there is no list of choices.
+ */
+function CountField({ value, onChange, fallback }: { value: number; onChange: (value: number) => void; fallback: string }) {
+  return (
+    <Input
+      aria-label="Requests at once"
+      className="h-7 rounded-[6px] text-[13px] tabular-nums"
+      inputMode="numeric"
+      onChange={(event) => {
+        const typed = Number(event.target.value.replace(/\D/g, "").slice(0, 2));
+        onChange(Math.min(MAX_CONCURRENCY, typed));
+      }}
+      placeholder={fallback}
+      value={value ? String(value) : ""}
+    />
+  );
+}
+
+const timesLabel = (count: number) => (count === 1 ? "one request at a time" : `${count} requests at a time`);
+
+/**
+ * Ollama's cap is a setting of the Ollama server, which Endurance does not start: it shows the command for the
+ * person to run, and what it measured once a model ran under the saved cap (src/harness/ollama-parallel).
+ */
+function OllamaCapNote({ connectionId, address, cap, savedCap }: { connectionId: string; address: string; cap: number; savedCap: number }) {
+  const [measured, setMeasured] = useState<{ model: string; cap: number; served: number }[]>([]);
+  useEffect(() => {
+    if (!window.endurance) return;
+    let cancelled = false;
+    window.endurance
+      .ollamaMeasured(connectionId)
+      .then((value) => !cancelled && setMeasured(value))
+      .catch(() => !cancelled && setMeasured([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [connectionId, savedCap]);
+  if (cap === 1) return null;
+  let local = false;
+  try {
+    local = classifyHost(new URL(address).hostname) === "loopback";
+  } catch {
+    // An address being typed; the steps for another server fit it.
+  }
+  const fewer = cap === savedCap ? measured.filter((item) => item.cap === cap && item.served < cap) : [];
+  return (
+    <div className="!mt-1 space-y-1 px-1.5 text-[12px] leading-[1.35] text-muted-foreground">
+      {local ? (
+        <>
+          <p>Applies after Ollama restarts. Run the command, then quit and reopen Ollama.</p>
+          <Command value={`launchctl setenv OLLAMA_NUM_PARALLEL ${cap}`} />
+        </>
+      ) : (
+        <p>Applies after Ollama restarts. Set OLLAMA_NUM_PARALLEL={cap} on the server, then restart Ollama.</p>
+      )}
+      {fewer.map((item) => (
+        <p key={item.model}>
+          {item.model.replace(/:latest$/, "")} served {timesLabel(item.served)}.
+        </p>
+      ))}
+    </div>
+  );
+}
 const HOSTING: { id: ServerHosting; label: string }[] = [
   { id: "self-hosted", label: "Self-hosted" },
   { id: "third-party", label: "Third-party provider" },
@@ -389,7 +456,7 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
       {/* Bare text starts where the field's straight edge does: in by its 6px corner radius. */}
       <div className="min-w-0 flex-1 pl-1.5">
         <div className="text-[13px] leading-[1.4]">{label}</div>
-        {hint && <div className="mt-1 text-[12px] leading-[1.35] text-muted-foreground">{hint}</div>}
+        {hint && <div className="mt-1 text-pretty text-[12px] leading-[1.35] text-muted-foreground">{hint}</div>}
       </div>
       <div className="flex w-40 shrink-0 justify-end">{children}</div>
     </div>
@@ -911,27 +978,24 @@ function ConnectionRow({
                       Signed address: {saved.queryNames!.join(", ")} saved in Keychain and added to each request to this server.
                     </p>
                   )}
+                  {connection.kind === "ollama" && (
+                    <div className="space-y-px">
+                      <Row hint="Concurrent requests per model, each with its own KV cache" label="Requests at once">
+                        <CountField fallback="1" onChange={(value) => edit(() => setConcurrency(value))} value={concurrency} />
+                      </Row>
+                      <OllamaCapNote address={address} cap={concurrency || 1} connectionId={connection.id} savedCap={connection.concurrency || 1} />
+                    </div>
+                  )}
                   {connection.kind !== "ollama" && (
                     <Row
-                      hint="Set a number if this server handles only a few at a time. Extra replies then wait here, and the chat you're viewing goes first."
-                      label="Replies at once"
+                      hint="Concurrent requests, with the rest queued in Endurance"
+                      label="Requests at once"
                     >
-                      <Select onValueChange={(value) => value !== null && edit(() => setConcurrency(Number(value)))} value={String(concurrency)}>
-                        <SelectTrigger aria-label="Replies at once" className="h-7 w-full rounded-[6px] text-[13px]" size="sm">
-                          <SelectValue>{concurrencyLabel(concurrency)}</SelectValue>
-                        </SelectTrigger>
-                        <SelectContent>
-                          {CONCURRENCY.map((value) => (
-                            <SelectItem key={value} value={String(value)}>
-                              {concurrencyLabel(value)}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                      <CountField fallback="Server decides" onChange={(value) => edit(() => setConcurrency(value))} value={concurrency} />
                     </Row>
                   )}
                   {/* The person's own permission line: what Endurance may change on the server. */}
-                  <Row hint="Endurance only sends requests to a third-party provider. It changes models only on a self-hosted server." label="Hosting">
+                  <Row hint="Endurance manages models only on self-hosted servers" label="Hosting">
                       <Select onValueChange={(value) => (value === "self-hosted" || value === "third-party") && edit(() => setHosting(value))} value={hosting}>
                         <SelectTrigger aria-label="Hosting" className="h-7 w-full rounded-[6px] text-[13px]" size="sm">
                           <SelectValue>{HOSTING.find((item) => item.id === hosting)?.label}</SelectValue>

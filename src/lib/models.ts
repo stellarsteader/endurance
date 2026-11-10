@@ -156,7 +156,10 @@ export interface RuntimeConnection {
   apiKey: string;
   /** Extra request headers, such as a hosting provider's access token. Main process only. */
   headers?: Record<string, string>;
-  /** Requests sent to this server at once; unset lets the server decide. Not used for Ollama, which is measured. */
+  /**
+   * Requests sent to this server at once; unset lets the server decide. For Ollama it is per model and unset is
+   * one, Ollama's own default; how many a model really serves under it is measured (src/harness/ollama-parallel).
+   */
   concurrency?: number;
   /** Query parameters from a signed address, such as an access token. Main process only, like headers. */
   query?: string;

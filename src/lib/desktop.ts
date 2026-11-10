@@ -149,6 +149,8 @@ export interface DesktopAPI {
   reorderConnections(ids: string[]): Promise<void>;
   /** A vLLM server's load and cache, for display; undefined for other runtimes. */
   serverInfo(id: string): Promise<ServerInfo | undefined>;
+  /** What was last measured for each model of an Ollama connection: replies it wrote at once, up to `cap`. */
+  ollamaMeasured(id: string): Promise<{ model: string; cap: number; served: number }[]>;
   /** Removes a server with its saved key, headers and signed query. */
   removeConnection(id: string): Promise<void>;
   testConnection(id: string, test: ConnectionTest): Promise<RuntimeProbe>;

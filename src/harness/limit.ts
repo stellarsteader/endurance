@@ -2,9 +2,11 @@
  * Request slots per server, and which waiting call goes next.
  *
  * Ollama queues what it cannot serve at once in arrival order, so the app keeps that queue itself, per model.
- * How many one model serves at once is measured when it first matters (./ollama-parallel): until then, and for
- * models that cannot run in parallel, one at a time. Other servers batch requests, so they get as many as the
- * connection's Replies at once allows, unlimited unless set. When calls wait, the next free slot goes to
+ * A model gets at most the connection's "Requests at once" (one unless set, as Ollama's own default), counting
+ * chats, side chats and subagents together. Above one, how many it really serves is measured when it first
+ * matters (./ollama-parallel): until then, and for models that cannot run in parallel, one at a time. Other
+ * servers batch requests, so they get as many as the
+ * connection's Requests at once allows, unlimited unless set. When calls wait, the next free slot goes to
  * the chat on screen first, then other chats and side chats, then subagents, in arrival order within each.
  * A summary made before a reply has that reply's place, since the reply waits on it. A call already running is
  * never interrupted; an agent gives its slot back between steps.
@@ -17,7 +19,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { parseMetrics } from "./server-info";
 import { endpoint, headers, runtimeUrl, serverRoot } from "./runtime";
-import { forget, identity, measure, remember, remembered } from "./ollama-parallel";
+import { capOf, forget, identity, loadedModels, measure, remember, remembered, sameModel } from "./ollama-parallel";
 import type { RuntimeConnection } from "../lib/models";
 
 /** title: a chat's name, written by its own model after the first reply. Nothing waits on it, so it goes last. */
@@ -26,6 +28,36 @@ export interface CallContext {
   /** The chat the call is for; a side chat has its own. */
   chat?: string;
   kind: CallKind;
+  /**
+   * Told the Ollama model this call waits for while Ollama keeps memory for it (two models that do not fit
+   * together take turns), and undefined once Ollama starts loading or running this call's model.
+   */
+  wait?: (model: string | undefined) => void;
+  /** Told once per pair of Ollama models, the first time one was unloaded to run the other. */
+  swapped?: (models: [string, string]) => void;
+}
+
+/** What a chat's reply stream is told while Ollama keeps its calls waiting (see watchOllamaWait). */
+type WaitPart =
+  | { type: "data-status"; data: { state: "loading" } | { state: "waiting"; model: string }; transient: true }
+  | { type: "data-swap"; data: { models: [string, string] }; transient: true };
+
+/**
+ * A chat's reply says which model Ollama makes it wait for, and "Loading the model" once Ollama starts on its
+ * own. A stream that has already ended takes nothing more.
+ */
+export function chatWaits(write: (part: WaitPart) => void): Pick<CallContext, "wait" | "swapped"> {
+  const safely = (part: WaitPart) => {
+    try {
+      write(part);
+    } catch {
+      // The reply finished first.
+    }
+  };
+  return {
+    wait: (model) => safely({ type: "data-status", data: model ? { state: "waiting", model } : { state: "loading" }, transient: true }),
+    swapped: (models) => safely({ type: "data-swap", data: { models }, transient: true }),
+  };
 }
 
 const context = new AsyncLocalStorage<CallContext>();
@@ -67,8 +99,15 @@ interface Measured {
   model: string;
   /** Server, model file, version and window the capacity holds for (ollama-parallel.identity). */
   id?: string;
+  /** The connection's "Requests at once": never more than this at once, and what is measured up to. */
+  cap: number;
   /** Requests it serves at once; undefined until measured, or after real requests showed it wrong. */
   capacity?: number;
+  /**
+   * The model was seen unloaded while measured below its cap. Ollama may have restarted with a higher
+   * OLLAMA_NUM_PARALLEL since, so the saved count is measured again instead of reused.
+   */
+  stale?: boolean;
   checkedAt: number;
   measuring?: Promise<void>;
 }
@@ -86,7 +125,7 @@ let arrivals = 0;
 
 function dispatch(queue: Queue) {
   // Two calls for one Ollama model wait together for the first time: measure, with nothing else running on it.
-  if (queue.ollama && queue.ollama.capacity === undefined && queue.waiting.length && !queue.active) return void measureQueue(queue);
+  if (queue.ollama && queue.ollama.cap > 1 && queue.ollama.capacity === undefined && queue.waiting.length && !queue.active) return void measureQueue(queue);
   if (queue.ollama?.measuring) return;
   while (queue.active < queue.limit && queue.waiting.length) {
     let best = 0;
@@ -106,14 +145,16 @@ function measureQueue(queue: Queue) {
   const measured = queue.ollama!;
   if (measured.measuring) return measured.measuring;
   measured.measuring = (async () => {
+    const { cap } = measured;
     const id = await identity(measured.connection, measured.model);
-    let capacity = id ? remembered(id) : undefined;
+    let capacity = id ? remembered(id, cap) : undefined;
+    if (capacity !== undefined && capacity < cap && measured.stale) capacity = undefined;
     if (capacity === undefined) {
-      capacity = await measure(measured.connection, measured.model).catch(() => undefined);
-      if (capacity && id) remember(id, capacity);
+      capacity = await measure(measured.connection, measured.model, cap).catch(() => undefined);
+      if (capacity && id) remember(id, cap, capacity);
     }
     // A failed measurement serves one at a time; the identity is read again later and may let it measure again.
-    Object.assign(measured, { id, capacity: capacity ?? 1, checkedAt: Date.now() });
+    Object.assign(measured, { id, capacity: Math.min(cap, capacity ?? 1), checkedAt: Date.now(), stale: false });
     queue.limit = measured.capacity!;
   })().finally(() => {
     measured.measuring = undefined;
@@ -122,12 +163,17 @@ function measureQueue(queue: Queue) {
   return measured.measuring;
 }
 
-/** A changed version, model file or window means the measurement no longer holds. Read at most every 15 s. */
+/**
+ * A changed version, model file or window means the measurement no longer holds. Read at most every 15 s.
+ * A model seen unloaded while measured below its cap is measured again when next needed, not reused.
+ */
 async function recheck(queue: Queue) {
   const measured = queue.ollama;
   if (!measured || measured.capacity === undefined || Date.now() - measured.checkedAt < 15_000) return;
   measured.checkedAt = Date.now();
-  if ((await identity(measured.connection, measured.model)) === measured.id) return;
+  const id = await identity(measured.connection, measured.model);
+  if (id === measured.id) return;
+  if (id === undefined && measured.capacity < measured.cap) measured.stale = true;
   measured.capacity = undefined;
   queue.limit = 1;
 }
@@ -140,7 +186,7 @@ async function recheck(queue: Queue) {
 function firstPiece(queue: Queue, running: Running) {
   const measured = queue.ollama;
   if (!measured?.capacity || measured.capacity < 2 || !running.alongside.some((other) => other.ended)) return;
-  if (measured.id) forget(measured.id);
+  if (measured.id) forget(measured.id, measured.cap);
   measured.capacity = undefined;
   queue.limit = 1;
 }
@@ -162,9 +208,18 @@ export interface SlotTarget {
 
 function queueFor(target: SlotTarget): Queue | undefined {
   if (target.runtime === "ollama" && target.model) {
-    // Ollama serves requests in parallel per model; what the connection says does not change what it does.
+    // Ollama serves requests in parallel per model, as many as OLLAMA_NUM_PARALLEL and the model allow, and
+    // never more than the connection's cap here.
     const key = `${origin(target.connection)}|${target.model}`;
-    const queue = queues.get(key) ?? { limit: 1, active: 0, waiting: [], running: new Set(), ollama: { connection: target.connection, model: target.model, checkedAt: 0 } };
+    const cap = capOf(target.connection);
+    const queue = queues.get(key) ?? { limit: 1, active: 0, waiting: [], running: new Set(), ollama: { connection: target.connection, model: target.model, cap, checkedAt: 0 } };
+    queue.ollama!.connection = target.connection;
+    // A new cap is a new question: what was measured under the old one does not answer it.
+    if (queue.ollama!.cap !== cap) {
+      Object.assign(queue.ollama!, { cap, capacity: undefined, id: undefined, stale: false });
+      queue.limit = 1;
+      dispatch(queue);
+    }
     queues.set(key, queue);
     return queue;
   }
@@ -185,6 +240,7 @@ export async function concurrency(target: SlotTarget): Promise<number> {
   const queue = queueFor(target);
   if (!queue) return Number.POSITIVE_INFINITY;
   if (!queue.ollama) return queue.limit;
+  if (queue.ollama.cap === 1) return 1;
   await recheck(queue);
   if (queue.ollama.capacity === undefined && !queue.active) await measureQueue(queue);
   return queue.ollama.capacity ?? 1;
@@ -209,6 +265,69 @@ async function holdBack(target: SlotTarget, call: CallContext | undefined, signa
   if (target.runtime !== "vllm" || rank(call) < 2) return;
   const until = Date.now() + HOLD_MS;
   while (Date.now() < until && !signal.aborted && (await waitingOn(target.connection, target.model)) > 0) await new Promise((resolve) => setTimeout(resolve, LOOK_MS));
+}
+
+/** Pairs of Ollama models the chats were told take turns, once each while the app runs, as "server|a|b". */
+const swapsTold = new Set<string>();
+/** Ollama's name for its default tag is noise in a sentence. */
+const shortName = (model: string) => model.replace(/:latest$/, "");
+
+/**
+ * While Ollama has not started on this call's model, looks every second at the models it holds. Ollama lists a
+ * model from the moment it starts loading it, so a listing without this model means Ollama keeps the call
+ * waiting for memory, or for room among loaded models (OLLAMA_MAX_LOADED_MODELS). The call is told which model
+ * it waits for: the one Endurance is running on that server if any, else the first Ollama lists (another app
+ * may be using it). Stopped when the call's first piece arrives or the load ends. If the model waited for was
+ * unloaded by then, the two take turns, and the chat is told once for that pair.
+ */
+export function watchOllamaWait(target: SlotTarget): () => void {
+  const call = currentCall();
+  const model = target.model;
+  if (target.runtime !== "ollama" || !model || (!call?.wait && !call?.swapped)) return () => {};
+  const server = origin(target.connection);
+  let stopped = false;
+  let blocker: string | undefined;
+  // Told it no longer waits on another model: Ollama has started loading this one.
+  let cleared = false;
+  const busy = () =>
+    [...queues.entries()]
+      .filter(([key, queue]) => queue.ollama && queue.active > 0 && key.startsWith(`${server}|`))
+      .map(([, queue]) => queue.ollama!.model)
+      .filter((other) => !sameModel(other, model));
+  void (async () => {
+    while (!stopped) {
+      await new Promise((resolve) => setTimeout(resolve, LOOK_MS));
+      if (stopped) return;
+      const loaded = await loadedModels(target.connection);
+      // No answer: a load is in progress (Ollama answers after it) or the server is away.
+      if (stopped || !loaded?.length) continue;
+      if (loaded.some((name) => sameModel(name, model))) {
+        if (blocker) {
+          cleared = true;
+          call.wait?.(undefined);
+        }
+        return;
+      }
+      const next = busy().find((other) => loaded.some((name) => sameModel(name, other))) ?? loaded[0];
+      if (blocker && sameModel(blocker, next)) continue;
+      blocker = next;
+      call.wait?.(shortName(next));
+    }
+  })();
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    if (!blocker) return;
+    const waited = blocker;
+    if (!cleared) call.wait?.(undefined);
+    const key = `${server}|${[shortName(waited), shortName(model)].sort().join("|")}`;
+    if (!call.swapped || swapsTold.has(key)) return;
+    void loadedModels(target.connection).then((loaded) => {
+      if (!loaded || loaded.some((name) => sameModel(name, waited)) || swapsTold.has(key)) return;
+      swapsTold.add(key);
+      call.swapped?.([shortName(waited), shortName(model)]);
+    });
+  };
 }
 
 /** What a call in a slot tells the scheduler: its first piece arrived. */
@@ -242,19 +361,26 @@ export async function withSlot<T>(target: SlotTarget, signal: AbortSignal, work:
       signal.addEventListener("abort", cancel, { once: true });
       dispatch(queue);
     });
-  } else queue.active++;
+  } else {
+    queue.active++;
+    // A model seen unloaded is noticed even when nothing waits, so a count measured below the cap is not reused.
+    if (queue.ollama) void recheck(queue);
+  }
   const running: Running = { ended: false, alongside: [...queue.running] };
   queue.running.add(running);
+  const stopWatching = watchOllamaWait(target);
   let told = false;
   try {
     return await work({
       first: () => {
         if (told) return;
         told = true;
+        stopWatching();
         firstPiece(queue, running);
       },
     });
   } finally {
+    stopWatching();
     running.ended = true;
     queue.running.delete(running);
     queue.active--;
@@ -265,5 +391,6 @@ export async function withSlot<T>(target: SlotTarget, signal: AbortSignal, work:
 /** For tests: forgets every queue and what is on screen. */
 export function resetSlots() {
   queues.clear();
+  swapsTold.clear();
   visible = new Set();
 }

@@ -33,6 +33,7 @@ const api: DesktopAPI = {
   updateConnection: (id, edit) => ipcRenderer.invoke("connections:update", id, edit),
   reorderConnections: (ids) => ipcRenderer.invoke("connections:reorder", ids),
   serverInfo: (id) => ipcRenderer.invoke("connections:server-info", id),
+  ollamaMeasured: (id) => ipcRenderer.invoke("connections:ollama-measured", id),
   removeConnection: (id) => ipcRenderer.invoke("connections:remove", id),
   testConnection: (id, test) => ipcRenderer.invoke("connections:test", id, test),
   startChat: (id, body) => ipcRenderer.invoke("chat:start", id, body),

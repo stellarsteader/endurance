@@ -12,7 +12,7 @@ import { continueAnswer } from "./continuation";
 import type { CallInfo } from "./guarded";
 import { describeFailure } from "./failure";
 import { fitInstructions } from "./instructions";
-import { runAs } from "./limit";
+import { chatWaits, runAs } from "./limit";
 import { withLiveWindow } from "./profile/models";
 import type { AppUIMessage } from "../lib/types";
 
@@ -32,7 +32,7 @@ export async function resumeResponse(request: Request) {
     originalMessages: raw.messages,
     onError: describeFailure,
     execute: ({ writer }) =>
-      runAs({ chat: raw.id, kind: "chat" }, async () => {
+      runAs({ chat: raw.id, kind: "chat", ...chatWaits((part) => writer.write(part)) }, async () => {
         writer.write({ type: "start", messageId: last.id, messageMetadata: { model: raw.model, createdAt: last.metadata?.createdAt ?? started } });
         const body = await withLiveWindow(
           raw,

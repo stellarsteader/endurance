@@ -2,7 +2,7 @@
  * Connections IPC. The main process owns every saved connection: the renderer names one by ID, sees only
  * whether secrets exist, and receives the list and catalog as pushed snapshots.
  */
-import { BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { discoverModels, inspectServer, probeRuntime } from "../src/harness/runtime";
 import { DEFAULT_ADDRESSES, findServers, identifyServer } from "../src/harness/server-identity";
@@ -25,6 +25,7 @@ import type { Connection } from "../src/lib/connections";
 import { validHeaders, validQuery, vault } from "./connection-secrets";
 import { book } from "./connection-store";
 import { vllmServerInfo, type ServerInfo } from "../src/harness/server-info";
+import { measuredOn } from "../src/harness/ollama-parallel";
 
 type Trust = (event: IpcMainInvokeEvent | IpcMainEvent) => void;
 
@@ -328,6 +329,13 @@ export function registerConnectionsIPC(trusted: Trust) {
     const resolved = validConnectionId(id) && !plainHttpRefusal(book.get(id)?.baseUrl ?? "") ? book.resolve(id) : undefined;
     if (!resolved || resolved.runtime !== "vllm") return undefined;
     return vllmServerInfo(resolved.value, book.view(resolved.connection).selfHosted);
+  });
+  // The worker keeps these in the app's data folder (src/harness/ollama-parallel); read here for the settings.
+  ipcMain.handle("connections:ollama-measured", (event, id: unknown) => {
+    trusted(event);
+    const connection = validConnectionId(id) ? book.get(id) : undefined;
+    if (connection?.kind !== "ollama") return [];
+    return measuredOn(app.getPath("userData"), connection.baseUrl);
   });
   ipcMain.handle("connections:reorder", async (event, ids: unknown) => {
     trusted(event);

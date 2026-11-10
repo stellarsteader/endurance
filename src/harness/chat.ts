@@ -20,7 +20,7 @@ import { hasAttachments, type Reader } from "./attachments";
 import { attachmentId, documentFormat, imageFormat, SENT_IMAGE_FORMATS } from "../lib/attachments";
 import { tuned } from "./sampling";
 import { describeFailure } from "./failure";
-import { runAs } from "./limit";
+import { chatWaits, runAs } from "./limit";
 import type { AppUIMessage, Approval, ChatSettings, Usage } from "../lib/types";
 import type { CompactResult } from "../lib/desktop";
 import { estimateText } from "../lib/token-estimate";
@@ -356,7 +356,7 @@ export async function chatResponse(request: Request) {
     originalMessages: raw.messages,
     onError: describeFailure,
     execute: ({ writer }) =>
-      runAs({ chat: raw.id, kind: "chat" }, async () => {
+      runAs({ chat: raw.id, kind: "chat", ...chatWaits((part) => writer.write(part)) }, async () => {
       writer.write({ type: "start", messageMetadata: { model: raw.model, createdAt: started } });
       // The window the runtime holds now, loading the model first when only loading tells it.
       const body = await withLiveWindow(

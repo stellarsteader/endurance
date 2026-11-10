@@ -6,6 +6,7 @@
  */
 import type { ChatRequest } from "../chat";
 import { endpoint } from "../runtime";
+import { watchOllamaWait } from "../limit";
 import { runtimeProfile, type ModelFacts, type RuntimeProfile } from "./runtimes";
 import { observedDefault, resolveWindow, type WindowSource } from "../../lib/context-window";
 import { knobNamed, thinkingKnob, type Knob } from "./template";
@@ -116,7 +117,13 @@ async function loadFirst(body: ChatRequest, profile: ModelProfile, onLoad?: () =
     pending = load({ runtime: body.runtime, connection: body.connection }, body.runtimeModelId, window).finally(() => loading.delete(key));
     loading.set(key, pending);
   }
-  await pending;
+  // Ollama may keep the load waiting while another model holds the memory; the chat says which.
+  const stopWatching = watchOllamaWait({ connection: body.connection, runtime: body.runtime, model: body.runtimeModelId });
+  try {
+    await pending;
+  } finally {
+    stopWatching();
+  }
   facts.delete(key);
   return true;
 }

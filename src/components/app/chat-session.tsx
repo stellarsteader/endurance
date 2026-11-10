@@ -194,8 +194,15 @@ function useSessionCore({
         setWaitStatus(
           part.data.state === "loading"
             ? "Loading the model"
-            : `Reading ${part.data.file}${part.data.total > 1 ? ` · ${Math.min(part.data.done + 1, part.data.total)} of ${part.data.total}` : ""}`
+            : part.data.state === "waiting"
+              ? `Waiting for ${part.data.model} to finish`
+              : `Reading ${part.data.file}${part.data.total > 1 ? ` · ${Math.min(part.data.done + 1, part.data.total)} of ${part.data.total}` : ""}`
         );
+      // Told once per pair while the app runs, so it shows for a chat in the background too.
+      if (part.type === "data-swap")
+        toast(`${part.data.models[0]} and ${part.data.models[1]} don't fit in memory together.`, {
+          description: "Ollama unloads one to run the other, so each switch loads a model again.",
+        });
       // A refused request taught a window: the runtime was asked again, so the model list reads it again too.
       if (part.type === "data-fit") refreshModels();
       // The runtime loaded the model at a window the list did not have: that connection is read again.
