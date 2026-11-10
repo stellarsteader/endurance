@@ -391,7 +391,7 @@ function FolderAccess({
   };
   return (
     <div className="space-y-1.5">
-      <div className="text-[12px] leading-[1.35] text-muted-foreground">
+      <div className="px-2 text-[12px] leading-[1.35] text-muted-foreground">
         Folders
       </div>
       <div className="max-h-72 overflow-y-auto rounded-[12px] border p-1">
@@ -429,7 +429,7 @@ function ProjectInstructions({ value, onChange }: { value: string; onChange: (va
   const near = value.length > MAX_INSTRUCTIONS * 0.9;
   return (
     <label className="block space-y-1.5">
-      <span className="flex items-baseline justify-between gap-3 text-[12px] leading-[1.35] text-muted-foreground">
+      <span className="flex items-baseline justify-between gap-3 px-1.5 text-[12px] leading-[1.35] text-muted-foreground">
         Instructions
         {value && (
           <span className={cn("tabular-nums", near && "text-amber-600 dark:text-amber-400")}>
@@ -453,12 +453,15 @@ function ProjectForm({
   action,
   project,
   onSubmit,
+  onPolicy,
   onClose,
 }: {
   title: string;
   action: string;
   project?: Project;
   onSubmit: (name: string, policy: WorkspacePolicy, instructions: string) => Promise<void> | void;
+  /** Saves folder access as soon as it changes, without waiting for the action button. */
+  onPolicy?: (policy: WorkspacePolicy) => Promise<void>;
   onClose: () => void;
 }) {
   const [name, setName] = useState(project?.name ?? "");
@@ -491,7 +494,7 @@ function ProjectForm({
           </DialogTitle>
         </DialogHeader>
         <label className="block space-y-1.5">
-          <span className="text-[12px] leading-[1.35] text-muted-foreground">
+          <span className="block px-1.5 text-[12px] leading-[1.35] text-muted-foreground">
             Name
           </span>
           <Input
@@ -507,7 +510,12 @@ function ProjectForm({
           onChange={(next) => {
             // An empty name takes the first folder's name; a name already there, typed or filled, stays.
             if (!name.trim() && next.folders.length) setName(folderName(next.folders[0].path));
+            const previous = policy;
             setPolicy(next);
+            onPolicy?.(next).catch((error: unknown) => {
+              setPolicy(previous);
+              toast.error("Couldn't change folder access", { description: error instanceof Error ? ipcMessage(error) : undefined });
+            });
           }}
           policy={policy}
         />
@@ -570,6 +578,7 @@ export function ProjectSettingsDialog({
       action="Save"
       onClose={onClose}
       onSubmit={(name, policy, instructions) => updateProject(project.id, { name, access: policy, folders: undefined, instructions: instructions || undefined })}
+      onPolicy={(policy) => updateProject(project.id, { access: policy, folders: undefined })}
       project={project}
       title="Project settings"
     />

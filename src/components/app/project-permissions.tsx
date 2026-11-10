@@ -257,9 +257,8 @@ export function ProjectPermissions({ projectId }: { projectId: string }) {
 
   return (
     <div className="space-y-1.5">
-      <div className="flex items-baseline justify-between gap-3 text-[12px] leading-[1.35] text-muted-foreground">
+      <div className="flex items-baseline justify-between gap-3 px-2 text-[12px] leading-[1.35] text-muted-foreground">
         Permissions
-        <span>Changes here apply right away</span>
       </div>
       <div className="rounded-[12px] border p-1">
         <div className={heading}>
