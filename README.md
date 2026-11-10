@@ -23,7 +23,7 @@ ENDURANCE is a desktop chat app for AI models you run yourself. Connect Ollama, 
 
 ## What it does
 
-- **Chat with your own models.** Use a runtime on this computer or on any server you can reach, and pick the model per chat.
+- **Chat with your own models.** Use a runtime on your computer or on any server you can reach, and pick the model per chat.
 - **Models.** Set each model's name, context length, thinking and sampling.
 - **Projects.** Organize chats around the folders they work in. Every chat in a project shares its folders, instructions and permissions.
 - **Agent.** Works directly in your project, from code exploration to test runs, with every change tracked as a reviewable, reversible diff.
