@@ -14,6 +14,7 @@ import { answerTranscription, audioOnly, failTranscriptions, registerVoiceIPC } 
 import { configureIdentity } from "./identity";
 import { registerExportIPC } from "./export-ipc";
 import { registerTerminalIPC, stopTerminals, terminalsRunning } from "./terminal-ipc";
+import { registerUpdatesIPC } from "./updates-ipc";
 import type { ChatEvent, ChatNotice, CompactEvent, CompactResult, TitleEvent } from "../src/lib/desktop";
 import { IMAGE_SIDE } from "../src/lib/attachments";
 import type { AttachmentAsk } from "../src/harness/attachments";
@@ -263,6 +264,7 @@ else {
     registerVoiceIPC(trusted, engine);
     registerExportIPC(trusted);
     registerTerminalIPC(trusted);
+    registerUpdatesIPC(trusted);
     await openWindow();
     app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void openWindow(); });
   });

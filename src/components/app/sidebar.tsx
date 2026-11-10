@@ -73,6 +73,7 @@ import {
 import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { SettingsNav } from "./settings-nav";
+import { SidebarUpdate } from "./updates";
 import { SidebarDownloads } from "@/features/model-settings/downloads";
 import { NewProjectDialog, ProjectSettingsDialog } from "./project-dialog";
 import { librarySectionToOpen } from "./library";
@@ -860,9 +861,11 @@ export function Sidebar() {
       {/* The Models page already shows full progress. */}
       {settingsSection !== "models" && <SidebarDownloads onOpen={() => setSettingsSection("models")} />}
       <div className="shrink-0 border-t">
-        <div className="flex h-11 items-center gap-2 pr-2 pl-4">
-          {/* Empty where the profile was, so Settings keeps its place at the end of the row. */}
-          <div aria-hidden className="flex-1" />
+        <div className="flex h-11 items-center gap-2 pr-2 pl-2">
+          {/* Empty unless an update is waiting, so Settings keeps its place at the end of the row. */}
+          <div className="flex min-w-0 flex-1">
+            <SidebarUpdate className={sidebarFill} />
+          </div>
           <Button
             aria-label="Settings"
             aria-pressed={settingsOpen}

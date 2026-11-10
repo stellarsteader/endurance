@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { ChevronDownIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { PageScroll } from "./page-scroll";
+import { UpdateRow } from "./updates";
 
 const TITLES: { id: General["chatTitles"]; label: string }[] = [
   { id: "message", label: "From First Message" },
@@ -54,7 +55,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-/** Settings → General: notifications and how chats are named. */
+/** Settings → General: notifications, how chats are named, and updates. */
 export function GeneralSettings() {
   const { general: stored, setGeneral } = useStore();
   const general = { ...DEFAULT_GENERAL, ...stored };
@@ -113,6 +114,10 @@ export function GeneralSettings() {
               </DropdownMenuContent>
             </DropdownMenu>
           </Row>
+        </Section>
+
+        <Section title="Updates">
+          <UpdateRow />
         </Section>
       </div>
     </PageScroll>

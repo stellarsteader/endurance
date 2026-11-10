@@ -4,6 +4,7 @@ import { installWorkspaceBridge } from "./workspace-preload";
 import { installHistoryBridge } from "./history-preload";
 import { installVoiceBridge } from "./voice-preload";
 import { installTerminalBridge } from "./terminal-preload";
+import { installUpdatesBridge } from "./updates-preload";
 import type { CatalogResult, ChatEvent, DesktopAPI } from "../src/lib/desktop";
 import type { ConnectionView } from "../src/lib/connections";
 
@@ -52,3 +53,4 @@ installWorkspaceBridge();
 installHistoryBridge();
 installVoiceBridge();
 installTerminalBridge();
+installUpdatesBridge();
