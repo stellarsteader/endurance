@@ -22,6 +22,13 @@ electronFuses:
   enableNodeCliInspectArguments: false
   enableEmbeddedAsarIntegrityValidation: true
   onlyLoadAppFromAsar: true
+# Where installed apps look for a newer version. electron-builder writes the latest*.yml update files next to the
+# installers and app-update.yml into the app; release.yml uploads them to the tag's GitHub Release. Must name the same
+# repository as RELEASES in electron/updates-ipc.ts.
+publish:
+  provider: github
+  owner: stellarsteader
+  repo: endurance
 extraResources:
   - from: LICENSE
     to: licenses/LICENSE
@@ -29,8 +36,12 @@ extraResources:
     to: licenses/endurance-core-LICENSE
 mac:
   category: public.app-category.productivity
+  # The dmg is for first installs. The zip is what macOS's updater (Squirrel.Mac) installs from, so it is built now
+  # and used once releases are signed with a Developer ID. Until then the app only says a new version is out.
   target:
     - target: dmg
+      arch: [arm64, x64]
+    - target: zip
       arch: [arm64, x64]
   darkModeSupport: true
   # No certificate signing by default (CI, releases, anyone without a certificate). `null` also makes electron-builder ignore
