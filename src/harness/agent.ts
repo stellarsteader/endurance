@@ -38,9 +38,9 @@ import { tuned } from "./sampling";
 import { Stopped } from "./loop-guard";
 import { thinkingCall } from "./reasoning";
 import { streamReply } from "./reply";
-import { concurrency, currentCall, runAs } from "./limit";
+import { chatWaits, concurrency, currentCall, runAs } from "./limit";
 import { continueAnswer } from "./continuation";
-import { documentize, hasLarge, type Document } from "./documents";
+import { documentize, hasLarge, makeDocument, pieceTokens, type Document } from "./documents";
 import { hasAttachments, readAttachments } from "./attachments";
 import { endpoint } from "./runtime";
 import { brokenArguments, markupStart, recoverCalls, singleCallTemplate, unsupportedTools } from "./tool-support";
@@ -216,10 +216,12 @@ const toolsFor = (abilities: Abilities, coordinator: boolean): ToolName[] => [
   ...(abilities.files ? ((abilities.readOnly ? ["list", "search", "read"] : ["list", "search", "read", "edit", "write", "delete"]) as ToolName[]) : []),
   ...(abilities.shell ? (["run_shell"] as ToolName[]) : []),
   ...(abilities.web ? (["web_search", "fetch"] as ToolName[]) : []),
-  ...(abilities.documents ? (["read_document", "search_document"] as ToolName[]) : []),
+  // Offered with the shell too, whose long output becomes a document mid-run: the tool list stays the same through
+  // the run, so the runtime's cached prompt holds when the first one appears.
+  ...(abilities.documents || abilities.shell ? (["read_document", "search_document"] as ToolName[]) : []),
   ...(coordinator && abilities.changes ? (["update_todos", "propose_plan"] as ToolName[]) : []),
   ...(coordinator && abilities.skills ? (["use_skill"] as ToolName[]) : []),
-  ...(coordinator ? (["ask_user", "delegate"] as ToolName[]) : []),
+  ...(coordinator ? (["ask_user", "delegate_task"] as ToolName[]) : []),
 ];
 
 /**
@@ -296,6 +298,8 @@ interface Run {
   /** The plan the user approved in this request, and the to-do list as it stands, for what a summary puts back. */
   plan?: string;
   todos?: { title: string; status: string }[];
+  /** The turn whose text answer was followed by where the approved plan stands (planLeftOpen). */
+  planNoted?: number;
   /** For a work subagent given paths: the only files and folders it may change. */
   limitTo?: string[];
   failures: number;
@@ -379,6 +383,8 @@ function approvalResponse(messages: AppUIMessage[]) {
 /** How a loop shows what it does: the coordinator in the trace and the reply, a subagent in its card. */
 interface View {
   text?: (delta: string) => void;
+  /** Ends the reply's current text, so text written after it starts a part of its own. */
+  textEnd?: () => void;
   reasoning: (delta: string) => void;
   thoughtDone: () => void;
   toolStart: (name: ToolName, args: Args) => { done: (outcome: Outcome) => void };
@@ -405,7 +411,7 @@ interface Env {
    * run's earlier steps. Changes the run's history; false when there was nothing left to summarize.
    */
   compact?: (run: Run, budget: Budget) => Promise<boolean>;
-  /** Runs delegate and use_skill, which need the coordinator's state. */
+  /** Runs delegate_task and use_skill, which need the coordinator's state. */
   special?: (call: StreamedToolCall, name: ToolName, args: Args, room: number) => Promise<Outcome>;
   /**
    * For a call that needs approval first (going online, a plan, a shell command): shows the card, pauses the run
@@ -422,7 +428,7 @@ type LoopEnd = { kind: "answered"; text: string } | { kind: "paused" } | { kind:
  */
 const signatureOf = (name: string, args: Args) =>
   name === "read" ? `read:${JSON.stringify({ paths: [...new Set(args.paths ?? [])].sort(), line: args.line ?? 1, start: args.start ?? 0 })}` : `${name}:${JSON.stringify(args)}`;
-const online = (name: ToolName, abilities: Abilities) => name === "web_search" || name === "fetch" || (name === "delegate" && abilities.web);
+const online = (name: ToolName, abilities: Abilities) => name === "web_search" || name === "fetch" || (name === "delegate_task" && abilities.web);
 
 /** Reads a file's start through the workspace, as the read tool would, for what a summary puts back. */
 const readerOf = (workspace: Workspace): State["read"] => async (file, chars) => {
@@ -547,7 +553,20 @@ async function shellCall(run: Run, env: Env, call: StreamedToolCall, args: Args,
     refused.length ? `The sandbox does not let commands read these, outside the project in the home folder: ${refused.join(", ")}. Ask the user if the work needs them.` : "",
     !network && result.exitCode !== 0 && triedNetwork(result.output) ? "This command ran without network. To reach the internet, call run_shell again with network set to true; the user approves it on a card. Internet Access does not affect commands." : "",
   ].filter(Boolean);
-  const keep = Math.max(200, charsFor(room, run.ratio) - header.length - 80 - notes.join(" ").length);
+  // At most one document piece of output, however much room is free: a recursive listing or a verbose install
+  // costs a few thousand tokens, not half the window. Codex (10 KB) and Claude Code (30,000 characters) cap what the
+  // model sees of a command in the same range; the card still shows all of it.
+  const limit = Math.min(charsFor(room, run.ratio), charsFor(pieceTokens(env.body.contextWindow), run.ratio));
+  let keep = Math.max(200, limit - header.length - 80 - notes.join(" ").length);
+  // What is left out stays readable, as OpenCode and Claude Code keep long output in a file the model can search.
+  if (result.output.length > keep) {
+    const document = makeDocument(`D${run.documents.length + 1}`, `The output of \`${command.length > 60 ? `${command.slice(0, 60)}…` : command}\``, result.output, env.body.contextWindow, true);
+    run.documents.push(document);
+    env.abilities.documents = true;
+    const note = `The output is ${document.lines} lines, about ${document.tokens} tokens, so only its start and end are shown. All of it is document ${document.id} in ${document.pieces.length} pieces: find something in it with search_document, or read pieces with read_document.`;
+    notes.push(note);
+    keep = Math.max(200, keep - note.length);
+  }
   return { text: header + (headAndTail(result.output, keep) || "(no output)") + (notes.length ? `\n\n${notes.join("\n")}` : "") };
 }
 
@@ -654,7 +673,7 @@ async function runCall(run: Run, env: Env, call: StreamedToolCall, room: number)
   const outcome =
     name === "run_shell"
       ? await shellCall(run, env, call, args, room)
-      : name === "use_skill" || name === "delegate" || name === "propose_plan" || name === "ask_user"
+      : name === "use_skill" || name === "delegate_task" || name === "propose_plan" || name === "ask_user"
       ? await env.special!(call, name, args, room)
       : await runTool({ workspace: env.workspace, writer: env.writer, signal: env.signal, sources: run.sources, room, ratio: run.ratio, documents: run.documents }, name, args);
   trace.done(outcome);
@@ -762,7 +781,13 @@ async function drive(run: Run, env: Env, pending: StreamedToolCall[] = []): Prom
         run.turn--;
         continue;
       }
-      if (step === "answer") return answerAfterJson(run, env, system);
+      if (step === "answer") {
+        const note = planLeftOpen(run, env);
+        if (!note) return answerAfterJson(run, env, system);
+        run.history.push(Message.user(note));
+        run.planNoted = run.turn;
+        continue;
+      }
       if (step === "paused") return { kind: "paused" };
       continue;
     }
@@ -779,12 +804,42 @@ async function drive(run: Run, env: Env, pending: StreamedToolCall[] = []): Prom
       run.turn--;
       continue;
     }
+    if (outcome.kind === "answered" && !last) {
+      const note = planLeftOpen(run, env);
+      if (note) {
+        // The text stays in the reply and in the conversation; the run goes on after it.
+        if (outcome.text.trim()) run.history.push(Message.assistant(outcome.text));
+        run.history.push(Message.user(note));
+        run.planNoted = run.turn;
+        env.view.textEnd?.();
+        continue;
+      }
+    }
     if (outcome.kind !== "calls") return outcome;
     // Offered no tools, a model may still write a call; what it wrote besides is its answer.
     if (last) return { kind: "answered", text: outcome.text };
     if (!(await runCalls(run, env, outcome.calls))) return { kind: "paused" };
     if (signal.aborted) throw signal.reason;
   }
+}
+
+/**
+ * Where the approved plan stands, when a reply would end on text while its steps are not all done: a reply ends when
+ * the model answers without a tool call, and small models stop after a step to say what comes next. The run goes on
+ * with this note, as Gemini CLI tells a model that stopped mid-task to continue, judged here from the plan's own
+ * to-do list rather than by another model call. Undefined when there is no approved plan, every step is done, or the
+ * note was given right before this answer: a model that answers in text again without a tool call between has stopped
+ * on purpose (blocked, or waiting on the user), and the reply ends.
+ */
+function planLeftOpen(run: Run, env: Env) {
+  if (!env.coordinator || run.plan === undefined || !run.todos?.length) return undefined;
+  if (run.planNoted !== undefined && run.planNoted === run.turn - 1) return undefined;
+  const open = run.todos.filter((item) => item.status !== "completed");
+  if (!open.length) return undefined;
+  const next = open.find((item) => item.status === "in_progress") ?? open[0];
+  return appNote(
+    `The approved plan is not finished: ${run.todos.length - open.length} of ${run.todos.length} steps are done, and the next is "${next.title}". Mark finished steps with update_todos and go on with the next one. If it cannot go on, say what blocks it, or ask the user with ask_user.`
+  );
 }
 
 /** New results need at least this share of the input budget; older results are cleared to give it. */
@@ -1299,8 +1354,16 @@ async function runSubagent(parent: Run, env: Env, agent: SubagentData, assignmen
   };
   let partial = false;
   try {
-    // A subagent's calls wait behind the chats' own (see ./limit).
-    const end = await runAs({ chat: currentCall()?.chat, kind: "subagent" }, () => drive(run, { ...env, abilities, coordinator: false, maxTurns: MAX_SUBAGENT_TURNS, view, compact: undefined, special: undefined, ask: undefined }));
+    // A subagent's calls wait behind the chats' own (see ./limit). Its card says which model Ollama makes it
+    // wait for; the chat is told when two models take turns.
+    let before: string | undefined;
+    const wait = (model: string | undefined) => {
+      if (model && agent.currentStep?.startsWith("Waiting for ")) agent.currentStep = `Waiting for ${model} to finish`;
+      else if (model) [before, agent.currentStep] = [agent.currentStep, `Waiting for ${model} to finish`];
+      else agent.currentStep = before;
+      update(agent);
+    };
+    const end = await runAs({ chat: currentCall()?.chat, kind: "subagent", wait, swapped: currentCall()?.swapped }, () => drive(run, { ...env, abilities, coordinator: false, maxTurns: MAX_SUBAGENT_TURNS, view, compact: undefined, special: undefined, ask: undefined }));
     agent.result = fitReport((end.kind === "paused" ? "" : end.text).trim() || "Finished without a report.", words);
     agent.status = "done";
     // Made to answer at its step limit or after repeated failures, it may not have finished the assignment.
@@ -1368,7 +1431,7 @@ export async function agentResponse(request: Request) {
     originalMessages: raw.messages,
     onError: describeFailure,
     execute: ({ writer }) =>
-      runAs({ chat: chatId, kind: "chat" }, async () => {
+      runAs({ chat: chatId, kind: "chat", ...chatWaits((part) => writer.write(part)) }, async () => {
       const started = resumed?.run.started ?? Date.now();
       // A resumed run continues the assistant message that asked for approval.
       writer.write({ type: "start", messageMetadata: { model: raw.model, createdAt: started }, ...(response ? { messageId: response.messageId } : {}) });
@@ -1562,6 +1625,7 @@ export async function agentResponse(request: Request) {
         textPart = undefined;
       };
       const view: View = {
+        textEnd: closeText,
         text: (delta) => {
           if (!textPart) {
             textPart = `text-${crypto.randomUUID()}`;
@@ -1766,7 +1830,7 @@ export async function agentResponse(request: Request) {
                 return `${agent.name} (${state}): ${agent.result}${written.length ? `\nFiles written: ${written.join(", ")}` : ""}`;
               })
               .join("\n\n")
-              .concat(left.length ? `\n\nNot run: one call runs at most ${MAX_SUBAGENTS} assignments, so ${left.join(", ")} did not start. Delegate again if still needed.` : ""),
+              .concat(left.length ? `\n\nNot run: one call runs at most ${MAX_SUBAGENTS} assignments, so ${left.join(", ")} did not start. Call delegate_task again if they are still needed.` : ""),
           };
         },
         ask: (calls, request) => {
@@ -1775,7 +1839,7 @@ export async function agentResponse(request: Request) {
           const args = argsOf(call.input);
           const kind = request?.kind ?? "web_access";
           const toolCallId = `${kind}-${crypto.randomUUID()}`;
-          const purpose = call.name === "delegate" ? "Let subagents search and read the web" : isTool(call.name) ? wording(call.name, args).active : call.name;
+          const purpose = call.name === "delegate_task" ? "Let subagents search and read the web" : isTool(call.name) ? wording(call.name, args).active : call.name;
           closeText();
           writer.write({ type: "tool-input-available", toolCallId, toolName: kind, input: request?.input ?? { purpose, query: args.query, url: args.url }, dynamic: true });
           // Every card that asks sits where it asked in the trace, so what the run does after the answer comes below

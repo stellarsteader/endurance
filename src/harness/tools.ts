@@ -9,13 +9,13 @@ import type { UIMessageStreamWriter } from "ai";
 import { AccessDenied, MAX_DELETE, type Workspace } from "./workspace-tools";
 import { webFetch, webSearch } from "./web";
 import { charsFor, LEAST_RESULT } from "./budget";
-import { readPieces, searchPieces, type Document } from "./documents";
+import { findText, readPieces, searchPieces, type Document } from "./documents";
 import type { AppUIMessage, CotKind } from "../lib/types";
 
-export type ToolName = "list" | "search" | "read" | "edit" | "write" | "delete" | "run_shell" | "web_search" | "fetch" | "read_document" | "search_document" | "update_todos" | "propose_plan" | "ask_user" | "use_skill" | "delegate";
-export const TOOL_NAMES: readonly ToolName[] = ["list", "search", "read", "edit", "write", "delete", "run_shell", "web_search", "fetch", "read_document", "search_document", "update_todos", "propose_plan", "ask_user", "use_skill", "delegate"];
+export type ToolName = "list" | "search" | "read" | "edit" | "write" | "delete" | "run_shell" | "web_search" | "fetch" | "read_document" | "search_document" | "update_todos" | "propose_plan" | "ask_user" | "use_skill" | "delegate_task";
+export const TOOL_NAMES: readonly ToolName[] = ["list", "search", "read", "edit", "write", "delete", "run_shell", "web_search", "fetch", "read_document", "search_document", "update_todos", "propose_plan", "ask_user", "use_skill", "delegate_task"];
 export const isTool = (value: unknown): value is ToolName => TOOL_NAMES.includes(value as ToolName);
-/** Subagents one delegation may start. */
+/** Subagents one delegate_task call may start. */
 export const MAX_SUBAGENTS = 3;
 /** Questions one request may ask the user; past that the agent goes on with its best judgment. */
 export const MAX_QUESTIONS = 2;
@@ -81,12 +81,12 @@ const SPECS: Record<ToolName, { description: string; parameters: object }> = {
     parameters: object({ url: text("The full https:// address."), start: { type: "integer", minimum: 0, description: "Character to continue a long page from." } }, ["url"]),
   },
   read_document: {
-    description: "Read pieces of a document from the conversation (one too long to send whole), from a piece number on. Long reads come in parts; the result says where to continue.",
+    description: "Read pieces of a document (text too long to send whole, from the conversation or a command's output), from a piece number on. Long reads come in parts; the result says where to continue.",
     parameters: object({ document: text("The document's id, such as D1."), piece: { type: "integer", minimum: 1, description: "The piece to start from." } }, ["document", "piece"]),
   },
   search_document: {
-    description: "Find which pieces of the conversation's documents mention something. Use a few words; the best matches come first, with the line that matched.",
-    parameters: object({ query: text("A few words the pieces would contain."), document: text("Optional document id, such as D1; all of them when left out.") }, ["query"]),
+    description: "Find text in the documents. Text that occurs as written, such as a path, a name or an error message, is found line by line with its line and piece numbers. Otherwise the pieces that best match its words come first.",
+    parameters: object({ query: text("The exact text to find, or a few words the pieces would contain."), document: text("Optional document id, such as D1; all of them when left out.") }, ["query"]),
   },
   update_todos: {
     description: `Keep a to-do list for work with ${LEAST_TODOS} or more separate changes: send the whole list each time, each item pending, in_progress or completed, and mark items as you finish them. Not for a single change or a question.`,
@@ -130,9 +130,9 @@ const SPECS: Record<ToolName, { description: string; parameters: object }> = {
     description: "Load the full instructions of an installed skill when the request matches its description.",
     parameters: object({ skill: text("The skill's name, exactly as listed.") }, ["skill"]),
   },
-  delegate: {
+  delegate_task: {
     description:
-      "Give bounded, independent work to subagents. Each works in a fresh conversation and reports back once, so its reading and searching stay out of yours. Use it to look through many files or several separate areas (one assignment each), or for independent changes to separate files. Not for one file, a quick lookup, or the step you need before anything else. Subagents know nothing of this conversation: give each a complete task with the goal, the files or folders, what is already known and what to return. Kind explore only reads and searches; kind work may also change the files in its paths, so give work assignments different files. Check what a subagent reports before relying on it. Subagents cannot delegate or ask the user.",
+      "Give bounded, independent work to subagents. Each works in a fresh conversation and reports back once, so its reading and searching stay out of yours. Use it to look through many files or several separate areas (one assignment each), or for independent changes to separate files. Not for one file, a quick lookup, or the step you need before anything else. Subagents know nothing of this conversation: give each a complete task with the goal, the files or folders, what is already known and what to return. Kind explore only reads and searches; kind work may also change the files in its paths, so give work assignments different files. Check what a subagent reports before relying on it. Subagents cannot call delegate_task or ask the user.",
     parameters: object(
       {
         assignments: {
@@ -279,7 +279,7 @@ export function missing(name: ToolName, args: Args) {
   if (name === "ask_user" && !args.question) return "Not asked: ask_user needs the question.";
   if (name === "update_todos" && (args.todos ?? []).filter((item) => item.title).length < LEAST_TODOS)
     return `Not run: a to-do list is for work with ${LEAST_TODOS} or more separate changes. Do this work directly.`;
-  if (name === "delegate" && !(args.assignments ?? []).some((item) => item.task?.trim())) return "Not run: delegate needs at least one assignment with a task.";
+  if (name === "delegate_task" && !(args.assignments ?? []).some((item) => item.task?.trim())) return "Not run: delegate_task needs at least one assignment with a task.";
   return undefined;
 }
 
@@ -344,7 +344,7 @@ const TRACE: Record<ToolName, { kind: CotKind; verbs: readonly [active: string, 
   ask_user: { kind: "think", verbs: ["Asking", "Asked", "ask"] },
   search_document: { kind: "search", verbs: ["Searching", "Searched", "search"] },
   use_skill: { kind: "skill", verbs: ["Using", "Used", "use"] },
-  delegate: { kind: "delegate", verbs: ["Delegating to", "Delegated to", "delegate to"] },
+  delegate_task: { kind: "delegate", verbs: ["Delegating to", "Delegated to", "delegate to"] },
 };
 
 function subject(name: ToolName, args: Args) {
@@ -359,7 +359,7 @@ function subject(name: ToolName, args: Args) {
   if (name === "ask_user") return `you: “${(args.question ?? "").replace(/\s+/g, " ").slice(0, 80)}”`;
   if (name === "read_document") return `${args.document || "the document"}${args.piece && args.piece > 1 ? ` from piece ${args.piece}` : ""}`;
   if (name === "search_document") return `${args.document || "the documents"} for “${args.query ?? ""}”`;
-  if (name === "delegate") return (args.assignments ?? []).map((item) => item.name).filter(Boolean).join(", ") || "subagents";
+  if (name === "delegate_task") return (args.assignments ?? []).map((item) => item.name).filter(Boolean).join(", ") || "subagents";
   if (name === "delete" || (name === "read" && (args.paths?.length ?? 0) > 1))
     return args.paths?.length ? `${args.paths[0]}${args.paths.length > 1 ? ` and ${args.paths.length - 1} more` : ""}` : "files";
   if (name === "read") return `${args.paths?.[0] || args.path || "a file"}${args.line && args.line > 1 ? ` from line ${args.line}` : ""}`;
@@ -502,7 +502,7 @@ async function deleteFiles(context: ToolContext, paths: string[]): Promise<Outco
     : { text: lines.join("\n"), failed: (problems[0] instanceof Error ? problems[0].message : "Not deleted").slice(0, 120) };
 }
 
-/** Runs a file or web call. use_skill, delegate, propose_plan and ask_user are run by the agent, which holds the run's state. */
+/** Runs a file or web call. use_skill, delegate_task, propose_plan and ask_user are run by the agent, which holds the run's state. */
 export async function runTool(context: ToolContext, name: ToolName, args: Args): Promise<Outcome> {
   const { workspace, writer } = context;
   const size = charsFor(context.room, context.ratio);
@@ -543,10 +543,25 @@ export async function runTool(context: ToolContext, name: ToolName, args: Args):
       const named = args.document ? documents.filter((document) => document.id === args.document) : documents;
       if (!named.length) return { text: `Not run: there is no document ${args.document ?? ""}. Documents: ${documents.map((document) => document.id).join(", ") || "none"}.`, failed: "No such document" };
       if (name === "read_document") return { text: readPieces(named[0], args.piece ?? 1, size), files: [named[0].name] };
+      // Text as written first, line by line, as grep and the search tools of Claude Code and OpenCode find it; only
+      // when it occurs nowhere are pieces ranked by its words. At most one piece's worth of lines, however much room is free.
+      const exact = findText(named, args.query ?? "", Math.min(size, charsFor(Math.max(...named.map((document) => document.piece)), context.ratio)));
+      if (exact.total) {
+        const rows = exact.shown.map(({ document, line, piece, text }) => `${document.id} line ${line}, piece #${piece.n}: ${text}`);
+        const count = exact.total === 1 ? "1 line contains" : `${exact.total} lines contain`;
+        const more = exact.total > exact.shown.length ? ` The first ${exact.shown.length} are shown; search for longer text to narrow them.` : "";
+        return {
+          text: `${count} "${args.query}".${more}\n${rows.join("\n")}\nRead the piece around a line with read_document.`,
+          files: [...new Set(exact.shown.map(({ document }) => document.name))],
+        };
+      }
       const found = searchPieces(named, args.query ?? "");
-      if (!found.length) return { text: `No piece mentions any of: ${args.query}.` };
+      if (!found.length) return { text: `No piece contains "${args.query}" or any of its words.` };
       const lines = found.map(({ document, piece, line }) => `${document.id} piece #${piece.n} (lines ${piece.from}–${piece.to})${piece.heading ? ` § ${piece.heading}` : ""}: ${line}`);
-      return { text: `${lines.join("\n")}\nRead a piece with read_document.`, files: [...new Set(found.map(({ document }) => document.name))] };
+      return {
+        text: `No line contains "${args.query}" as written. Pieces that best match its words:\n${lines.join("\n")}\nRead a piece with read_document.`,
+        files: [...new Set(found.map(({ document }) => document.name))],
+      };
     }
     if (name === "list") {
       const listed = await workspace.list(args.path || workspace.label(workspace.policy.folders[0].path));

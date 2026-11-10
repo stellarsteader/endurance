@@ -1,5 +1,6 @@
 /**
- * Text too large to send whole, read as a document instead: a long paste or a large text attachment. A part
+ * Text too large to send whole, read as a document instead: a long paste, a large text attachment, or a command's
+ * output past what a result shows (agent shellCall). A part
  * that takes more than half of what the request may hold is split into pieces; the model gets a list of the
  * pieces, the first ones and the last one as far as they fit, and tools to read any piece and search them all
  * (read_document, search_document). Nothing is cut away unseen, and nothing is summarized in advance.
@@ -43,7 +44,11 @@ export interface Document {
   /** D1, D2, … in the order they appear in the conversation. */
   id: string;
   name: string;
+  /** The whole text, so exact text is found by its own lines (findText). */
+  text: string;
   pieces: Piece[];
+  /** Tokens per piece, which also bounds what one search shows. */
+  piece: number;
   lines: number;
   tokens: number;
 }
@@ -138,11 +143,20 @@ function cut(block: Block, size: number): Block[] {
   return parts.map((text) => ({ ...block, text }));
 }
 
-/** Tokens per piece for a window. */
-export const pieceTokens = (window: number) => Math.max(LEAST_PIECE, Math.min(MOST_PIECE, Math.floor(window / 8)));
+/** Tokens per piece for a window; the largest piece when the window is not known. */
+export const pieceTokens = (window?: number) => (window ? Math.max(LEAST_PIECE, Math.min(MOST_PIECE, Math.floor(window / 8))) : MOST_PIECE);
 
-/** The text in pieces of about `tokens` tokens, ending where the text does. */
-export function split(text: string, tokens: number): Piece[] {
+/** Text read as a document, in pieces for the window; `lines` for line-oriented text such as a command's output. */
+export function makeDocument(id: string, name: string, text: string, window?: number, lines = false): Document {
+  const piece = pieceTokens(window);
+  return { id, name, text, pieces: split(text, piece, lines), piece, lines: text.split("\n").length, tokens: estimateText(text) };
+}
+
+/**
+ * The text in pieces of about `tokens` tokens, ending where the text does. Line-oriented text (a command's output) is
+ * cut only between lines, as code is, so no path or log line is split across two pieces.
+ */
+export function split(text: string, tokens: number, lines = false): Piece[] {
   const size = tokens * CHARS;
   const pieces: Omit<Piece, "n">[] = [];
   let current: Block[] = [];
@@ -153,7 +167,8 @@ export function split(text: string, tokens: number): Piece[] {
     current = [];
     length = 0;
   };
-  for (const block of blocks(text)) {
+  for (const found of blocks(text)) {
+    const block = lines ? { ...found, code: true } : found;
     for (const part of block.text.length > size ? cut(block, size) : [block]) {
       // A new section starts a new piece once the current one is half full.
       const section = HEADING.test(part.text) && length > size / 2;
@@ -242,7 +257,6 @@ function attachedText(part: AppUIMessage["parts"][number]) {
 export function documentize(messages: AppUIMessage[], budget: Budget): { messages: AppUIMessage[]; documents: Document[] } {
   const documents: Document[] = [];
   if (!budget.window) return { messages, documents };
-  const size = pieceTokens(budget.window);
   const converted = messages.map((message) => {
     if (message.role !== "user") return message;
     let changed = false;
@@ -253,7 +267,7 @@ export function documentize(messages: AppUIMessage[], budget: Budget): { message
       if (!isLarge(tokens, budget)) return part;
       changed = true;
       const name = part.type === "file" ? (part.filename ?? "An attached file") : "The pasted text";
-      const document: Document = { id: `D${documents.length + 1}`, name, pieces: split(text, size), lines: text.split("\n").length, tokens };
+      const document = makeDocument(`D${documents.length + 1}`, name, text, budget.window);
       documents.push(document);
       return builtPart({ type: "text" as const, text: standIn(document, budget) });
     });
@@ -280,7 +294,55 @@ export function readPieces(document: Document, from: number, chars: number) {
   return parts.join("\n\n") + (next ? `\n\n… pieces #${next}–${document.pieces.length} remain. Read again from piece ${next} to continue.` : "");
 }
 
-const UNSPACED = /[\p{Script=Hangul}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+/** A line cut to about `width` characters around `at`, so a match in a long line (minified code, a log record) still shows. */
+function around(line: string, at: number, width = 160) {
+  if (line.length <= width) return line.trim();
+  const start = Math.max(0, Math.min(at - width / 2, line.length - width));
+  return `${start > 0 ? "…" : ""}${line.slice(start, start + width).trim()}${start + width < line.length ? "…" : ""}`;
+}
+
+/** The piece a line of the document falls in: one whose lines cover it and whose text holds it. */
+function pieceOf(document: Document, line: number, text: string) {
+  const covering = document.pieces.filter((piece) => piece.from <= line && line <= piece.to);
+  return covering.find((piece) => piece.text.includes(text)) ?? covering[0] ?? document.pieces[0];
+}
+
+export interface Found {
+  document: Document;
+  line: number;
+  piece: Piece;
+  text: string;
+}
+
+/**
+ * The lines that hold `query` as written, ignoring case, in document order, as grep finds them: a path, a name or an
+ * error message is matched whole, where search by words splits it into words that occur everywhere. As many lines as
+ * fit in `chars`; `total` counts every match.
+ */
+export function findText(documents: Document[], query: string, chars: number) {
+  const wanted = query.trim().toLowerCase();
+  const shown: Found[] = [];
+  let total = 0;
+  let used = 0;
+  if (!wanted) return { total, shown };
+  for (const document of documents) {
+    document.text.split("\n").forEach((raw, index) => {
+      const text = raw.replace(/\r$/, "");
+      const at = text.toLowerCase().indexOf(wanted);
+      if (at < 0) return;
+      total++;
+      const row = around(text, at);
+      // About what the row takes in the result with its place ("D1 line 48213, piece #93: ").
+      const cost = row.length + 30;
+      if (shown.length && used + cost > chars) return;
+      shown.push({ document, line: index + 1, piece: pieceOf(document, index + 1, text), text: row });
+      used += cost;
+    });
+  }
+  return { total, shown };
+}
+
+const UNSPACED =/[\p{Script=Hangul}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 
 /** Words, and for text written without spaces between words, also its pairs of characters. */
 export function terms(text: string) {
