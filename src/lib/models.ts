@@ -18,7 +18,11 @@ export const MODEL_KINDS: { value: ModelKind; label: string }[] = [
 /** The connection a model is served from. */
 export type ModelGroup = string;
 /** Where a server runs, from its address: decides wording and the Remote label, never what is sent. */
-export type ServerLocation = "this-computer" | "network" | "remote";
+/**
+ * Where a server runs, by the address space of its host. "private" also counts Tailscale (100.64.0.0/10 and
+ * *.ts.net), which is shared rather than RFC 1918 space, because it is the person's own network.
+ */
+export type ServerLocation = "loopback" | "private" | "public";
 
 export interface ModelInfo {
   id: string;

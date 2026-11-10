@@ -998,9 +998,9 @@ function shellDetail(ran: ShellOutput | undefined, asking: boolean, unknown: boo
  */
 function ToolBlock({ part, live, expired }: { part: ToolPartLike; live: boolean; expired: boolean }) {
   const { chat, model, thread } = useSession();
-  // A chat whose model runs elsewhere already leaves this computer; the card must not promise otherwise.
+  // A chat whose model runs elsewhere already leaves the local machine; the card must not promise otherwise.
   const location = model.location;
-  const elsewhere = location === "network" || location === "remote";
+  const elsewhere = location === "private" || location === "public";
   const name = toolNameOf(part);
   const approval = "approval" in part ? part.approval : undefined;
   const asking = part.state === "approval-requested" && !expired;
@@ -1104,7 +1104,7 @@ function ToolBlock({ part, live, expired }: { part: ToolPartLike; live: boolean;
             {web ? (
               elsewhere
                 ? "This sends search terms and page addresses to the internet. Turn Internet Access off to stop web requests from this chat."
-                : "This sends search terms and page addresses to the internet. Turn Internet Access off to keep this chat on this computer."
+                : "This sends search terms and page addresses to the internet. Turn Internet Access off to keep the chat local."
             ) : (
               `Runs in ${shell?.cwd ?? "the project"}. It can change files only in Read & write folders${shell?.network ? "" : " and has no internet"}, and stops after 2 minutes.`
             )}

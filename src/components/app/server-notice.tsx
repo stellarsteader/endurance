@@ -41,7 +41,7 @@ export function ServerNotice() {
     icon = <LoaderCircleIcon className="animate-spin motion-reduce:animate-none" />;
     text = `${connection.label} is starting. It's checked again on its own.`;
     action = pick("Choose another model");
-  } else if (folders && connection.location !== "this-computer") {
+  } else if (folders && connection.location !== "loopback") {
     icon = <FolderOutputIcon />;
     text = `Folder contents are sent to ${connection.host}.`;
     action = pick("Change model");

@@ -187,7 +187,7 @@ function ModelGroupSection({ group, reorderable, children }: { group: ModelGroup
         >
           {group.label}
           <span className="ml-auto flex items-center gap-1.5 font-normal">
-            {group.location === "remote" ? <LocationBadge location="remote" /> : group.local && <LocalDot />}
+            {group.location === "public" ? <LocationBadge location="public" /> : group.local && <LocalDot />}
             {group.meta}
           </span>
         </DropdownMenuLabel>

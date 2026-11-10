@@ -23,17 +23,26 @@ export interface Connection {
   /** Shown instead of the default label; added servers start with their host name. */
   name?: string;
   concurrency?: number;
-  /** Whether the person runs this server. Unset follows the address: this computer and the person's network are theirs. */
-  owner?: ServerOwner;
+  /** Unset is self-hosted. The address cannot tell a rented GPU server from a provider's endpoint, so it is not guessed. */
+  hosting?: ServerHosting;
   /** Set when the server last answered at this address; "Ended" needs a server that once answered. */
   lastConnectedAt?: number;
+  /**
+   * A runtime the server identified as that the person chose not to switch to. They are asked again only
+   * when it identifies as a different one, since a fingerprint can be shared by related servers.
+   */
+  declined?: RuntimeId;
 }
 
-export type ServerOwner = "mine" | "external";
-export const isOwner = (value: unknown): value is ServerOwner => value === "mine" || value === "external";
-/** A server the person runs is read more fully (vLLM's development endpoints); an external one is only used. */
-export const ownerOf = (connection: Pick<Connection, "owner">, location: ServerLocation): ServerOwner =>
-  connection.owner ?? (location === "remote" ? "external" : "mine");
+/**
+ * Who operates the inference server. Self-hosted: the person or their organization runs it, on any hardware
+ * (localhost, a machine on their network, a rented GPU server, a team's server). Third-party: an outside
+ * provider's service. Endurance only sends requests to a third-party provider: it does not download, delete or
+ * change models there, use the GPU manager, or read development endpoints.
+ */
+export type ServerHosting = "self-hosted" | "third-party";
+export const isHosting = (value: unknown): value is ServerHosting => value === "self-hosted" || value === "third-party";
+export const hostingOf = (connection: Pick<Connection, "hosting">): ServerHosting => connection.hosting ?? "self-hosted";
 /** The runtimes this build supports fully; the others work through the shared OpenAI-compatible path. */
 export const SUPPORTED_RUNTIMES: readonly RuntimeId[] = ["ollama", "vllm"];
 
@@ -45,8 +54,8 @@ export interface ConnectionView extends Connection {
   label: string;
   host: string;
   location: ServerLocation;
-  /** `owner` as set, else as the address suggests. */
-  mine: boolean;
+  /** `hosting` as set, else self-hosted. */
+  selfHosted: boolean;
   secrets: ConnectionSecrets;
 }
 
@@ -75,31 +84,31 @@ function ipv4(host: string) {
 }
 
 /**
- * Where an address points, from the address alone. Loopback is this computer; RFC 1918, link-local,
- * IPv6 unique-local, .local, single-label names and Tailscale (100.64.0.0/10, *.ts.net) are the
- * person's network; everything else is remote. When unsure, it says remote, which discloses more.
+ * Where an address points, from the address alone: loopback for localhost; private for RFC 1918, link-local,
+ * IPv6 unique-local, .local, single-label names and Tailscale (100.64.0.0/10, *.ts.net); public for everything
+ * else. When unsure, it says public, which discloses more.
  */
 export function classifyHost(hostname: string): ServerLocation {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
-  if (!host) return "remote";
-  if (host === "localhost" || host.endsWith(".localhost") || host === "::1" || host === "0.0.0.0") return "this-computer";
+  if (!host) return "public";
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1" || host === "0.0.0.0") return "loopback";
   const mapped = host.startsWith("::ffff:") ? host.slice(7) : host;
   const v4 = ipv4(mapped);
   if (v4) {
     const [a, b] = v4;
-    if (a === 127) return "this-computer";
-    if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127)) return "network";
-    return "remote";
+    if (a === 127) return "loopback";
+    if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127)) return "private";
+    return "public";
   }
-  if (host.includes(":")) return /^(fc|fd|fe[89ab])/.test(host) ? "network" : "remote";
-  if (host.endsWith(".local") || host.endsWith(".ts.net") || host.endsWith(".lan") || host.endsWith(".home.arpa") || host.endsWith(".internal")) return "network";
-  if (!host.includes(".")) return "network";
-  return "remote";
+  if (host.includes(":")) return /^(fc|fd|fe[89ab])/.test(host) ? "private" : "public";
+  if (host.endsWith(".local") || host.endsWith(".ts.net") || host.endsWith(".lan") || host.endsWith(".home.arpa") || host.endsWith(".internal")) return "private";
+  if (!host.includes(".")) return "private";
+  return "public";
 }
 
 /**
- * This computer for the purpose of sending plain HTTP: `localhost`, 127.0.0.0/8 and `::1`. Unlike
- * classifyHost, the person's network and Tailscale addresses do not count, and neither do other names that
+ * Localhost for the purpose of sending plain HTTP: `localhost`, 127.0.0.0/8 and `::1`. Unlike
+ * classifyHost, private and Tailscale addresses do not count, and neither do other names that
  * may resolve here, because only these never leave the machine.
  */
 export function isLoopbackHost(hostname: string): boolean {
@@ -110,7 +119,7 @@ export function isLoopbackHost(hostname: string): boolean {
 
 /** Why an address is refused, shown when adding a server and wherever a saved one is used. */
 export const HTTPS_REQUIRED =
-  "Plain http:// is only allowed for this computer (127.0.0.1, localhost or [::1]). Use an https:// address for this server, for example through Tailscale Serve or a reverse proxy such as Caddy or nginx.";
+  "HTTP is only allowed for localhost. Use HTTPS for any other address, for example with Tailscale Serve.";
 
 export class InsecureAddressError extends Error {
   constructor() {
@@ -142,11 +151,11 @@ export function requireSecureAddress(baseUrl: string) {
 export function classifyAddresses(addresses: string[], fallback: ServerLocation): ServerLocation {
   if (!addresses.length) return fallback;
   const kinds = addresses.map(classifyHost);
-  return kinds.includes("remote") ? "remote" : kinds.includes("network") ? "network" : "this-computer";
+  return kinds.includes("public") ? "public" : kinds.includes("private") ? "private" : "loopback";
 }
 
 export const locationLabel = (location: ServerLocation) =>
-  location === "this-computer" ? "This computer" : location === "network" ? "Your network" : "Remote";
+  location === "loopback" ? "Localhost" : location === "private" ? "Private network" : "Public network";
 
 // ---------------------------------------------------------------------------------------------------
 // Pasted server input: a URL or a curl command.
@@ -221,11 +230,11 @@ const variables = (value: string) => [...value.matchAll(VARIABLE)].map((match) =
 function splitAddress(input: string): { baseUrl: string; query?: string } {
   let text = input.trim();
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
-    // Servers on this computer or the person's network usually serve plain HTTP; others HTTPS. A bare
-    // network address stays http:// so the person gets the refusal below, which says how to set up HTTPS,
+    // Servers on loopback or private addresses usually serve plain HTTP; others HTTPS. A bare
+    // private address stays http:// so the person gets the refusal below, which says how to set up HTTPS,
     // rather than a failed TLS handshake with a server that has none.
     const host = text.split(/[/?#:]/)[0];
-    text = `${classifyHost(host) === "remote" ? "https" : "http"}://${text}`;
+    text = `${classifyHost(host) === "public" ? "https" : "http"}://${text}`;
   }
   let url: URL;
   try {
@@ -325,6 +334,8 @@ export interface ConnectionFile {
   connections: Connection[];
   /** Runtimes the person removed, so detection does not add them back. */
   dismissed: RuntimeId[];
+  /** Addresses of found servers the person dismissed, so they are not suggested again. */
+  ignored: string[];
 }
 
 const slots = (value: unknown) => (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 64 ? value : undefined);
@@ -360,6 +371,7 @@ export function migrateLegacy(saved: LegacySettings | undefined): ConnectionFile
       return { ...base, baseUrl: address(old?.baseUrl, base.baseUrl), ...(concurrency ? { concurrency } : {}) };
     }),
     dismissed: [...new Set((saved?.dismissedRuntimes ?? []).filter((id): id is RuntimeId => isBuiltinId(id) && !PRIMARY_RUNTIMES.includes(id)))],
+    ignored: [],
   };
 }
 
@@ -383,8 +395,10 @@ export function normalizeFile(value: unknown): ConnectionFile {
       baseUrl,
       ...(typeof item.name === "string" && item.name.trim() ? { name: item.name.trim().slice(0, 80) } : {}),
       ...(concurrency ? { concurrency } : {}),
-      ...(isOwner(item.owner) ? { owner: item.owner } : {}),
+      // Before 2026-11-10 this was `owner`: "mine" or "external". Only "external" differs from the default.
+      ...(isHosting(item.hosting) ? { hosting: item.hosting } : (item as { owner?: unknown }).owner === "external" ? { hosting: "third-party" as const } : {}),
       ...(typeof item.lastConnectedAt === "number" && Number.isFinite(item.lastConnectedAt) ? { lastConnectedAt: item.lastConnectedAt } : {}),
+      ...(isRuntimeId(item.declined) ? { declined: item.declined } : {}),
     });
   }
   for (const id of PRIMARY_RUNTIMES) if (!seen.has(id)) connections.splice(PRIMARY_RUNTIMES.indexOf(id), 0, defaultConnection(id));
@@ -392,5 +406,6 @@ export function normalizeFile(value: unknown): ConnectionFile {
     version: 1,
     connections,
     dismissed: [...new Set((Array.isArray(input.dismissed) ? input.dismissed : []).filter((id): id is RuntimeId => isBuiltinId(id) && !PRIMARY_RUNTIMES.includes(id)))],
+    ignored: [...new Set((Array.isArray(input.ignored) ? input.ignored : []).filter((value): value is string => typeof value === "string" && value.length <= 2048).map((value) => address(value, "")).filter(Boolean))],
   };
 }

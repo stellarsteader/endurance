@@ -225,4 +225,15 @@ It is always laid out and fades in when the value differs from the default.
 
 Editing a row, such as a connection, opens its fields inline under the row. The rows below move down.
 There is no dialog. The edit icon is a bare icon, not a bordered button.
+Adding a row opens the same fields in the same order, where the Add row was.
+
+| Piece | Size | Line height | Color | Spacing |
+| --- | --- | --- | --- | --- |
+| Field label | 12px regular | 1.35 | Muted | Inset 6px, the field's radius, so it starts where the field's straight edge does. 6px above the field. |
+| Field | 13px | — | Primary | 6px radius, like the buttons beside it. 16px between fields. |
+| Field hint or error | 12px regular | 1.35 | Muted, or destructive | Inset 6px. 4px below the field. |
+
+An optional field shows what it falls back to as its placeholder, such as the host name, rather than the word Optional.
+Errors about what was typed show after Save, Add or Connect is pressed, and editing clears them.
+Rows carry no badges. Information that does not change what the person does is left out.
 A group label names a list inside a menu, such as Cloud models.

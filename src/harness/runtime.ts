@@ -47,9 +47,9 @@ export function connectionTransport(connection: Pick<RuntimeConnection, "query" 
 export function headers(connection: RuntimeConnection): Record<string, string> {
   return { ...(connection.headers ?? {}), ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}) };
 }
-/** A server reached over a network or tunnel may answer slowly; one on this computer that is slow is not there. */
+/** A server reached over a network or tunnel may answer slowly; one on localhost that is slow is not there. */
 const NETWORK_CHECK_MS = 10_000;
-/** Milliseconds for checks and model management: `local` on this computer, longer for a server elsewhere. */
+/** Milliseconds for checks and model management: `local` on localhost, longer for a server elsewhere. */
 export function checkTimeout(connection: RuntimeConnection, local = 3000) {
   let host = "";
   try {
@@ -57,7 +57,7 @@ export function checkTimeout(connection: RuntimeConnection, local = 3000) {
   } catch {
     // An address that does not parse is checked as if it were elsewhere.
   }
-  return classifyHost(host) === "this-computer" ? local : Math.max(local, NETWORK_CHECK_MS);
+  return classifyHost(host) === "loopback" ? local : Math.max(local, NETWORK_CHECK_MS);
 }
 class HttpStatus extends Error {
   constructor(readonly status: number, readonly server?: string | null) {

@@ -18,7 +18,7 @@
 ENDURANCE is a desktop chat app for AI models you run yourself. Connect Ollama, LM Studio, llama.cpp, vLLM or another compatible runtime, on your computer or on a server you operate, and let your models work in project folders, use tools and search the web. Chats and projects stay on your computer, encrypted.
 
 <p align="center">
-  <img src="docs/assets/architecture.svg" width="960" alt="Endurance architecture: the app sends prompts through the main process to the agent harness, which calls model runtimes on this computer or on your GPU server and streams events back to the chat thread" />
+  <img src="docs/assets/architecture.svg" width="960" alt="Endurance architecture: the app sends prompts through the main process to the agent harness, which calls local model runtimes or your GPU server and streams events back to the chat thread" />
 </p>
 
 ## What it does
@@ -61,7 +61,7 @@ There are no prebuilt downloads yet. Build the app on your Mac:
 
    On an Intel Mac, use `--x64` instead of `--arm64`.
 3. Open `release/mac-arm64/Endurance.app` (Intel: `release/mac/Endurance.app`). Drag it to Applications to keep it. From then on the app runs without a terminal or Node.
-4. Start a model runtime such as Ollama or LM Studio. Endurance finds runtimes on this computer by itself; connect any other server with **Add server**.
+4. Start a model runtime such as Ollama or LM Studio. Endurance finds local runtimes by itself; connect any other server with **Add server**.
 
 Your chats, projects, settings and connections are kept in `~/Library/Application Support/Endurance` on your Mac.
 

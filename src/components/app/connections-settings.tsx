@@ -7,25 +7,31 @@ import { ipcMessage } from "@/lib/desktop";
 import {
   endpointLabel,
   formatContext,
-  getModel,
-  modelIdFor,
   normalizeBaseUrl,
   RUNTIMES,
   runtimeName,
   type RuntimeId,
 } from "@/lib/models";
-import { classifyHost, locationLabel, parseServerInput, plainHttpRefusal, SUPPORTED_RUNTIMES, type ConnectionView, type ParsedServer } from "@/lib/connections";
-import { LocationBadge } from "./location-badge";
+import {
+  hostingOf,
+  hostOf,
+  HTTPS_REQUIRED,
+  parseServerInput,
+  plainHttpRefusal,
+  type ConnectionView,
+  type ParsedServer,
+  type ServerHosting,
+} from "@/lib/connections";
 import { DragCard, DropIndicator, Reorderable, useReorderDrag, useReorderDrop } from "./reorder";
 import { moveId, type DropPosition } from "@/lib/ordering";
 import type { ServerInfo } from "@/harness/server-info";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import type { CatalogResult, ProbeReason, RuntimeProbe, ServerCheck } from "@/lib/desktop";
+import type { CatalogResult, FoundServer, ProbeReason, RuntimeProbe, ServerCheck } from "@/lib/desktop";
 import type { OllamaStatus } from "@/lib/workspace-api";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ArrowUpRightIcon, CheckIcon, ChevronDownIcon, CopyIcon, LoaderCircleIcon, PlusIcon, RefreshCwIcon, SettingsIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { PageScroll } from "./page-scroll";
 import { toast } from "sonner";
 
@@ -213,22 +219,35 @@ function statusLine(result: CatalogResult | undefined, ollama: OllamaStatus | nu
 
 const gigabytes = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 
-/** What a successful test reports, in the order people check: speed, version, models, what is in memory. */
-function probeText(connectionId: string, probe: RuntimeProbe) {
-  const loaded = probe.loaded ?? [];
-  const memory = loaded.reduce((total, item) => total + (item.bytes ?? 0), 0);
-  // The display name from Models settings, else the model ID without its Hugging Face owner path.
-  const first = loaded[0] ? getModel(modelIdFor(connectionId, loaded[0].name)).name.replace(/^hf\.co\/[^/]+\//, "") : undefined;
-  return [
-    probe.latencyMs !== undefined ? `${probe.latencyMs} ms` : undefined,
-    probe.version ? (/^\d/.test(probe.version) ? `v${probe.version}` : probe.version) : undefined,
-    probe.models !== undefined ? `${probe.models} ${probe.models === 1 ? "model" : "models"}` : undefined,
-    probe.maxContext ? `${formatContext(probe.maxContext)} context` : undefined,
-    probe.loaded ? (loaded.length === 0 ? "None loaded" : loaded.length === 1 ? `${first} loaded` : `${loaded.length} loaded`) : undefined,
-    memory ? gigabytes(memory) : undefined,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+/**
+ * Why the values being saved would not work, in a full sentence, or undefined when they may be saved. A server
+ * that is starting is saved, and so is one that names another runtime: its row then offers that runtime.
+ */
+function saveProblem(probe: RuntimeProbe, hasKey: boolean): string | undefined {
+  if (probe.ok || probe.reason === "starting") return undefined;
+  switch (probe.reason) {
+    case "other":
+      if (probe.detected === "airplay") return "AirPlay Receiver is using this port. Turn it off in System Settings, or use another port.";
+      return probe.detected ? undefined : "Another kind of server is answering at this address. Check the port.";
+    case "refused":
+      return "Nothing is answering at this address. Start the server, or check the address and port.";
+    case "host":
+      return "This host name can't be found. Check the address.";
+    case "timeout":
+      return "The server didn't respond in time. Check that it's running and reachable from this Mac.";
+    case "auth":
+      return hasKey ? "The server rejected this API key." : "This server needs an API key.";
+    case "not-api":
+      return "This address answers, but not as a model server. Check the path, such as /v1.";
+    case "tls":
+      return "The server's certificate isn't trusted by this Mac.";
+    case "address":
+      return "This address isn't valid.";
+    case "insecure":
+      return HTTPS_REQUIRED;
+    default:
+      return probe.status ? `The server answered with an error (HTTP ${probe.status}).` : "Couldn't reach the server.";
+  }
 }
 
 function OllamaAction({ status, onStatus }: { status: OllamaStatus; onStatus: (status: OllamaStatus) => void }) {
@@ -348,6 +367,10 @@ function SetupGuide({ runtimeId, onEditAddress }: { runtimeId: RuntimeId; onEdit
 const CONCURRENCY = [0, 1, 2, 4];
 /** Unset, a server takes what it can. Ollama's is measured per model instead (src/harness/ollama-parallel), so it has no row. */
 const concurrencyLabel = (value: number) => (value ? String(value) : "Server decides");
+const HOSTING: { id: ServerHosting; label: string }[] = [
+  { id: "self-hosted", label: "Self-hosted" },
+  { id: "third-party", label: "Third-party provider" },
+];
 
 /** "Name: value" per line. Returns the headers, or the first line that is not a header. */
 function parseHeaders(text: string): { headers: Record<string, string> } | { error: string } {
@@ -363,7 +386,8 @@ function parseHeaders(text: string): { headers: Record<string, string> } | { err
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <div className="flex items-center gap-6">
-      <div className="min-w-0 flex-1">
+      {/* Bare text starts where the field's straight edge does: in by its 6px corner radius. */}
+      <div className="min-w-0 flex-1 pl-1.5">
         <div className="text-[13px] leading-[1.4]">{label}</div>
         {hint && <div className="mt-1 text-[12px] leading-[1.35] text-muted-foreground">{hint}</div>}
       </div>
@@ -390,18 +414,12 @@ function LabelAction({ visible, onClick, children }: { visible: boolean; onClick
   );
 }
 
-function Dot({ state }: { state: CatalogResult["state"] | "testing-ok" | "testing-bad" | undefined }) {
+function Dot({ state }: { state: CatalogResult["state"] | undefined }) {
   return (
     <span
       className={cn(
         "size-1.5 shrink-0 rounded-full",
-        state === "connected" || state === "testing-ok"
-          ? "bg-emerald-500"
-          : state === "starting"
-            ? "animate-pulse bg-amber-500 motion-reduce:animate-none"
-            : state === "testing-bad"
-              ? "bg-red-500/80"
-              : "bg-muted-foreground/40"
+        state === "connected" ? "bg-emerald-500" : state === "starting" ? "animate-pulse bg-amber-500 motion-reduce:animate-none" : "bg-muted-foreground/40"
       )}
     />
   );
@@ -416,57 +434,11 @@ function RemoveConfirm({ label, onCancel, onRemove }: { label: string; onCancel:
         <Button className="h-7 rounded-[6px] text-[12px]" onClick={onCancel} type="button" variant="ghost">
           Cancel
         </Button>
-        <Button
-          autoFocus
-          className="h-7 rounded-[6px] bg-destructive/15 text-[12px] text-destructive hover:bg-destructive/25 hover:text-destructive dark:not-aria-expanded:hover:bg-destructive/25"
-          onClick={onRemove}
-          type="button"
-          variant="ghost"
-        >
+        <Button autoFocus className="h-7 rounded-[6px] text-[12px]" onClick={onRemove} type="button" variant="destructive">
           Remove
         </Button>
       </div>
     </div>
-  );
-}
-
-const badge = "inline-flex h-[18px] shrink-0 items-center rounded-full border px-1.5 font-normal text-[11px] leading-none text-muted-foreground";
-
-/** Whether the person runs the server, which they can change here, and whether the runtime is fully supported. */
-function ServerBadges({ connection }: { connection: ConnectionView }) {
-  const [saving, setSaving] = useState(false);
-  const experimental = !SUPPORTED_RUNTIMES.includes(connection.kind);
-  const toggle = () => {
-    if (!window.endurance || saving) return;
-    setSaving(true);
-    window.endurance
-      .updateConnection(connection.id, { owner: connection.mine ? "external" : "mine" })
-      .catch((error: Error) => toast.error("Couldn't change this server", { description: ipcMessage(error) }))
-      .finally(() => setSaving(false));
-  };
-  return (
-    <>
-      <LocationBadge location={connection.location} />
-      <button
-        aria-label={`${connection.label}: ${connection.mine ? "my server" : "external server"}. Change`}
-        className={cn(badge, "outline-none transition-colors hover:border-foreground/25 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40")}
-        disabled={saving || !window.endurance}
-        onClick={toggle}
-        title={
-          connection.mine
-            ? "You run this server. Endurance may read its development endpoints for more detail. Click if someone else runs it."
-            : "Someone else runs this server. Endurance only uses it and reads its public endpoints. Click if you run it."
-        }
-        type="button"
-      >
-        {connection.mine ? "My server" : "External"}
-      </button>
-      {experimental && (
-        <span className={badge} title={`${runtimeName(connection.kind)} works through the shared OpenAI-compatible path. Ollama and vLLM are fully supported.`}>
-          Experimental
-        </span>
-      )}
-    </>
   );
 }
 
@@ -486,7 +458,7 @@ function ServerDetails({ connection }: { connection: ConnectionView }) {
     return () => {
       cancelled = true;
     };
-  }, [open, connection.id, connection.mine]);
+  }, [open, connection.id, connection.selfHosted]);
   const rows: [string, string][] = info
     ? [
         ...(info.running !== undefined || info.waiting !== undefined ? [["Requests", `${info.running ?? 0} running · ${info.waiting ?? 0} waiting`] as [string, string]] : []),
@@ -520,13 +492,71 @@ function ServerDetails({ connection }: { connection: ConnectionView }) {
               <span className="truncate tabular-nums">{value}</span>
             </div>
           ))}
-          {info && connection.mine && info.development === false && (
+          {info && connection.selfHosted && info.development === false && (
             <p className="pt-1 text-muted-foreground">
               Start the server with VLLM_SERVER_DEV_MODE=1 to see its scheduler settings. That also turns on development endpoints, so use it only on your own network.
             </p>
           )}
         </div>
       </Collapse>
+    </div>
+  );
+}
+
+/** Offers the runtime the server identified as. The person's choice stands until they switch. */
+function IdentityNotice({ connection, identified }: { connection: ConnectionView; identified: RuntimeId }) {
+  const [busy, setBusy] = useState(false);
+  const current = runtimeName(connection.kind);
+  const found = runtimeName(identified);
+  const act = (action: () => Promise<unknown>) => {
+    if (busy) return;
+    setBusy(true);
+    action()
+      .catch((error: Error) => toast.error("Couldn't change this server", { description: ipcMessage(error) }))
+      .finally(() => setBusy(false));
+  };
+  if (!window.endurance) return null;
+  const api = window.endurance;
+  return (
+    <div className="space-y-2 pt-1">
+      <p className="text-[12px] leading-[1.35] text-muted-foreground">
+        {connection.kind === "openai" ? `The server identifies as ${found}.` : `The server identifies as ${found}, not ${current}.`}
+        {connection.builtin && " Switching starts this server's model settings over."}
+      </p>
+      <div className="flex items-center gap-2">
+        <Button className="h-7 rounded-[6px] text-[12px]" disabled={busy} onClick={() => act(() => api.switchToIdentified(connection.id))} variant="secondary">
+          Switch to {found}
+        </Button>
+        <Button className="h-7 rounded-[6px] text-[12px]" disabled={busy} onClick={() => act(() => api.keepRuntime(connection.id))} variant="ghost">
+          Keep {current}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** A server running at a runtime's default address that is not listed. Named only when its own endpoints confirm it. */
+function FoundRow({ server, onAdd, onDismiss }: { server: FoundServer; onAdd: () => void; onDismiss: () => void }) {
+  const models = `${server.models} ${server.models === 1 ? "model" : "models"}`;
+  const status = server.needsKey ? "Needs an API key" : server.confirmed ? models : `OpenAI-compatible · ${models}`;
+  return (
+    <div className="flex items-center gap-6 p-3">
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="text-[13px] leading-[1.4]">{server.confirmed ? `${runtimeName(server.kind)} found` : "Server found"}</div>
+        <div className="truncate font-mono text-[12px] leading-[1.35] text-muted-foreground">{endpointLabel(server.baseUrl)}</div>
+        <div
+          className="truncate text-[12px] leading-[1.35] text-muted-foreground"
+          title={server.confirmed ? undefined : "The server does not name its runtime. It is added as an OpenAI-compatible server."}
+        >
+          {status}
+        </div>
+      </div>
+      <Button className="h-7 shrink-0 rounded-[6px] text-[12px]" onClick={onDismiss} variant="ghost">
+        Dismiss
+      </Button>
+      <Button className="h-7 shrink-0 rounded-[6px] text-[12px]" onClick={onAdd} variant="secondary">
+        Add
+      </Button>
     </div>
   );
 }
@@ -561,6 +591,7 @@ function ConnectionRow({
   const [headersText, setHeadersText] = useState<string | null>(null);
   const [headersRemoved, setHeadersRemoved] = useState(false);
   const [concurrency, setConcurrency] = useState(connection.concurrency ?? 0);
+  const [hosting, setHosting] = useState<ServerHosting>(hostingOf(connection));
   const [moveSecrets, setMoveSecrets] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -580,6 +611,10 @@ function ConnectionRow({
   const address = normalizeBaseUrl(baseUrl, defaults?.baseUrl || connection.baseUrl);
   // The main process refuses these too; checking here shows why before Test or Save is tried.
   const addressRefusal = plainHttpRefusal(address);
+  // Problems with what is typed show once Save is pressed, not while typing, and editing clears them.
+  const [tried, setTried] = useState(false);
+  const shownRefusal = tried ? addressRefusal : undefined;
+  const shownHeadersError = tried ? headersError : "";
   const savedRefusal = plainHttpRefusal(connection.baseUrl);
   // Saved secrets are bound to the saved address; a new address gets them only when the person says so.
   const addressChanged = address.replace(/\/+$/, "") !== connection.baseUrl.replace(/\/+$/, "");
@@ -588,32 +623,12 @@ function ConnectionRow({
   const headersFor = () => (parsed && "headers" in parsed ? parsed.headers : headersRemoved ? {} : null);
   const hasKeyNow = key !== null ? Boolean(key.trim()) : saved.hasKey && !keyRemoved && secretsUsable;
 
-  const [probe, setProbe] = useState<RuntimeProbe | null>(null);
-  const [testing, setTesting] = useState(false);
-  const testRun = useRef(0);
-  // A result describes the values it tested; editing them makes it stale.
+  // A reason describes the values it checked; editing them clears it.
   const edit = (update: () => void) => {
     update();
-    testRun.current++;
-    setProbe(null);
-    setTesting(false);
     setSaveError("");
+    setTried(false);
   };
-  const test = async () => {
-    if (!window.endurance || headersError || addressRefusal) return;
-    const run = ++testRun.current;
-    setTesting(true);
-    setProbe(null);
-    try {
-      const value = await window.endurance.testConnection(connection.id, { baseUrl: address, apiKey: keyFor(), headers: headersFor(), moveSecrets });
-      if (run === testRun.current) setProbe(value);
-    } catch {
-      if (run === testRun.current) setProbe({ ok: false, reason: "error" });
-    } finally {
-      if (run === testRun.current) setTesting(false);
-    }
-  };
-  const result = probe ? (probe.ok ? probeText(connection.id, probe) : reasonText(probe.reason, hasKeyNow, probe.status, probe.detected)) : "";
 
   useEffect(() => {
     if (open) firstFieldRef.current?.focus({ preventScroll: true });
@@ -633,9 +648,10 @@ function ConnectionRow({
       setHeadersText(null);
       setHeadersRemoved(false);
       setConcurrency(connection.concurrency ?? 0);
+      setHosting(hostingOf(connection));
       setMoveSecrets(false);
       setConfirmRemove(false);
-      setAdvanced(Boolean(saved.headerNames.length || connection.concurrency));
+      setAdvanced(Boolean(saved.headerNames.length || connection.concurrency || connection.hosting));
     });
 
   // A row opened from outside (just added) starts from the saved values.
@@ -651,16 +667,29 @@ function ConnectionRow({
 
   const toggle = () => onOpenChange(!open);
 
+  // Save is the test: a new address, key or headers are tried first, and the panel stays open with the reason
+  // when the server would not work. A change to the name, the number of replies or the hosting saves without asking.
   const save = async () => {
+    setTried(true);
     if (headersError || addressRefusal || saving || !window.endurance) return;
     setSaving(true);
+    setSaveError("");
     try {
       const apiKey = keyFor();
       const headers = headersFor();
+      if (addressChanged || apiKey !== null || headers !== null || moveSecrets) {
+        const probe = await window.endurance.testConnection(connection.id, { baseUrl: address, apiKey, headers, moveSecrets });
+        const problem = saveProblem(probe, hasKeyNow);
+        if (problem) {
+          setSaveError(problem);
+          return;
+        }
+      }
       await window.endurance.updateConnection(connection.id, {
         baseUrl: address,
-        ...(connection.builtin ? {} : { name }),
+        name,
         concurrency: concurrency || undefined,
+        ...(hosting !== hostingOf(connection) ? { hosting: hosting === "self-hosted" ? null : hosting } : {}),
         apiKey: apiKey === null ? { keep: true } : apiKey ? { replace: apiKey } : { remove: true },
         headers: headers === null ? { keep: true } : Object.keys(headers).length ? { replace: headers } : { remove: true },
         moveSecrets: (addressChanged || Boolean(saved.elsewhere)) && moveSecrets,
@@ -673,6 +702,10 @@ function ConnectionRow({
     }
   };
 
+  // The server named another runtime than it is set up as, and the person has not answered for that one.
+  // The default runtime's row is not offered a switch: it stays listed as it is.
+  const identified = catalog?.identified;
+  const other = connected && identified && identified !== "unknown" && identified !== connection.kind && identified !== connection.declined && !connection.primary ? identified : undefined;
   // A refused address is never checked, so its row says why from the first render.
   const status = savedRefusal ? reasonText("insecure", false) : statusLine(catalog, connection.id === "ollama" ? ollama : undefined, saved.hasKey, connection.lastConnectedAt);
   // Dragged by its heading; a row being edited stays put.
@@ -684,16 +717,14 @@ function ConnectionRow({
       <DropIndicator placement={placement} />
       <div className="flex items-center gap-6 p-3" ref={setDrag} {...handle}>
         <div className="min-w-0 flex-1 space-y-1">
-          <div className="flex items-center gap-2 text-[13px] leading-[1.4]">
-            <span className="truncate">{connection.label}</span>
-            <ServerBadges connection={connection} />
-          </div>
+          <div className="truncate text-[13px] leading-[1.4]">{connection.label}</div>
           <div className="truncate font-mono text-[12px] leading-[1.35] text-muted-foreground">{endpointLabel(connection.baseUrl)}</div>
           <div className="flex items-center gap-1.5 text-[12px] leading-[1.35] text-muted-foreground">
             <Dot state={savedRefusal ? "unavailable" : catalog?.state} />
             <span className="truncate">{status}</span>
           </div>
           {savedRefusal && !open && <p className="text-[12px] leading-[1.35] text-destructive">{savedRefusal}</p>}
+          {other && <IdentityNotice connection={connection} identified={other} />}
         </div>
         {connection.id === "ollama" && ollama && !connected && onOllama && <OllamaAction onStatus={onOllama} status={ollama} />}
         {showSetup && (
@@ -732,7 +763,8 @@ function ConnectionRow({
           <SettingsIcon className="size-3.5" />
         </button>
       </div>
-      {connection.kind === "vllm" && connected && <ServerDetails connection={connection} />}
+      {/* vLLM's load and setup hints only for a server that confirmed it is vLLM. */}
+      {connection.kind === "vllm" && connected && catalog?.identified === "vllm" && <ServerDetails connection={connection} />}
       {connection.builtin && (
         <Collapse open={setupOpen}>
           <div id={setupId}>
@@ -752,25 +784,23 @@ function ConnectionRow({
             void save();
           }}
         >
-          {!connection.builtin && (
-            <div className="space-y-1.5">
-              <label className="text-[12px] leading-[1.35] text-muted-foreground" htmlFor={`${formId}-name`}>
-                Name
-              </label>
-              <Input
-                autoFocus={focusName}
-                className="text-[13px]"
-                id={`${formId}-name`}
-                maxLength={80}
-                onChange={(event) => edit(() => setName(event.target.value))}
-                placeholder={connection.host}
-                ref={firstFieldRef}
-                value={name}
-              />
-            </div>
-          )}
           <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
+            <label className="block px-1.5 text-[12px] leading-[1.35] text-muted-foreground" htmlFor={`${formId}-name`}>
+              Name
+            </label>
+            <Input
+              autoFocus={focusName}
+              className="rounded-[6px] text-[13px]"
+              id={`${formId}-name`}
+              maxLength={80}
+              onChange={(event) => edit(() => setName(event.target.value))}
+              placeholder={connection.builtin ? runtimeName(connection.kind) : connection.host}
+              ref={firstFieldRef}
+              value={name}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between px-1.5">
               <label className="text-[12px] leading-[1.35] text-muted-foreground" htmlFor={`${formId}-address`}>
                 API address
               </label>
@@ -781,23 +811,23 @@ function ConnectionRow({
               )}
             </div>
             <Input
-              aria-describedby={addressRefusal ? `${formId}-address-error` : undefined}
-              aria-invalid={Boolean(addressRefusal)}
+              aria-describedby={shownRefusal ? `${formId}-address-error` : undefined}
+              aria-invalid={Boolean(shownRefusal)}
               autoCapitalize="off"
-              className="font-mono text-[13px]"
+              className="rounded-[6px] font-mono text-[13px]"
               id={`${formId}-address`}
               onChange={(event) => edit(() => setBaseUrl(event.target.value))}
-              ref={connection.builtin ? firstFieldRef : undefined}
+
               spellCheck={false}
               value={baseUrl}
             />
-            {addressRefusal && (
-              <p className="!mt-1 text-[12px] leading-[1.35] text-destructive" id={`${formId}-address-error`}>
-                {addressRefusal}
+            {shownRefusal && (
+              <p className="!mt-1 px-1.5 text-[12px] leading-[1.35] text-destructive" id={`${formId}-address-error`}>
+                {shownRefusal}
               </p>
             )}
             {hasSaved && (addressChanged || saved.elsewhere) && (
-              <label className="!mt-2 flex items-start gap-2 text-[12px] leading-[1.35] text-muted-foreground">
+              <label className="!mt-2 flex items-start gap-2 px-1.5 text-[12px] leading-[1.35] text-muted-foreground">
                 <input
                   checked={moveSecrets}
                   className="mt-[2px] accent-foreground"
@@ -812,7 +842,7 @@ function ConnectionRow({
             )}
           </div>
           <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between px-1.5">
               <label className="text-[12px] leading-[1.35] text-muted-foreground" htmlFor={`${formId}-key`}>
                 API key
               </label>
@@ -823,7 +853,7 @@ function ConnectionRow({
             <Input
               autoCapitalize="off"
               autoComplete="off"
-              className="font-mono text-[13px]"
+              className="rounded-[6px] font-mono text-[13px] placeholder:font-sans"
               id={`${formId}-key`}
               onChange={(event) => edit(() => setKey(event.target.value || null))}
               placeholder={saved.hasKey && !keyRemoved ? (secretsUsable ? "Saved in Keychain" : "Saved for another address") : "Leave empty unless the server asks for one"}
@@ -837,23 +867,18 @@ function ConnectionRow({
               <div className="flex items-center justify-between">
                 <button
                   aria-expanded={advanced}
-                  className="flex items-center gap-1 text-[12px] leading-[1.35] text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground"
+                  className="flex items-center gap-1 px-1.5 text-[12px] leading-[1.35] text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground"
                   onClick={() => setAdvanced((value) => !value)}
                   type="button"
                 >
                   Advanced
                   <ChevronDownIcon className={cn("size-3.5 transition-transform duration-200 motion-reduce:transition-none", advanced && "rotate-180")} />
                 </button>
-                {!connection.primary && (
-                  <LabelAction onClick={() => setConfirmRemove(true)} visible={!confirmRemove}>
-                    Remove from list
-                  </LabelAction>
-                )}
               </div>
               <Collapse open={advanced}>
                 <div className="space-y-4 pt-3">
                   <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between px-1.5">
                       <label className="text-[12px] leading-[1.35] text-muted-foreground" htmlFor={`${formId}-headers`}>
                         Extra headers
                       </label>
@@ -865,7 +890,7 @@ function ConnectionRow({
                       </LabelAction>
                     </div>
                     <textarea
-                      aria-invalid={Boolean(headersError)}
+                      aria-invalid={Boolean(shownHeadersError)}
                       className="block min-h-16 w-full resize-y rounded-[6px] border border-input bg-transparent px-2.5 py-2 font-mono text-[12px] leading-[1.5] outline-none placeholder:text-muted-foreground focus-visible:border-ring/70 aria-invalid:border-destructive dark:bg-input/30"
                       id={`${formId}-headers`}
                       onChange={(event) => edit(() => setHeadersText(event.target.value || null))}
@@ -877,12 +902,12 @@ function ConnectionRow({
                       value={headersText ?? ""}
                     />
                     {/* The format error takes the hint's place, so the form does not grow. */}
-                    <p className={cn("!mt-1 text-[12px] leading-[1.35]", headersError ? "text-destructive" : "text-muted-foreground")}>
-                      {headersError || "Only for hosts that require one, such as a preview access token. One per line."}
+                    <p className={cn("!mt-1 px-1.5 text-[12px] leading-[1.35]", shownHeadersError ? "text-destructive" : "text-muted-foreground")}>
+                      {shownHeadersError || "Only for hosts that require one, such as a preview access token. One per line."}
                     </p>
                   </div>
                   {Boolean(saved.queryNames?.length) && (
-                    <p className="text-[12px] leading-[1.35] text-muted-foreground">
+                    <p className="px-1.5 text-[12px] leading-[1.35] text-muted-foreground">
                       Signed address: {saved.queryNames!.join(", ")} saved in Keychain and added to each request to this server.
                     </p>
                   )}
@@ -905,12 +930,27 @@ function ConnectionRow({
                       </Select>
                     </Row>
                   )}
+                  {/* The person's own permission line: what Endurance may change on the server. */}
+                  <Row hint="Endurance only sends requests to a third-party provider. It changes models only on a self-hosted server." label="Hosting">
+                      <Select onValueChange={(value) => (value === "self-hosted" || value === "third-party") && edit(() => setHosting(value))} value={hosting}>
+                        <SelectTrigger aria-label="Hosting" className="h-7 w-full rounded-[6px] text-[13px]" size="sm">
+                          <SelectValue>{HOSTING.find((item) => item.id === hosting)?.label}</SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          {HOSTING.map((item) => (
+                            <SelectItem key={item.id} value={item.id}>
+                              {item.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                  </Row>
                 </div>
               </Collapse>
             </div>
           )}
           {saveError && (
-            <p className="text-[12px] leading-[1.35] text-destructive" role="alert">
+            <p className="px-1.5 text-[12px] leading-[1.35] text-destructive" role="alert">
               {saveError}
             </p>
           )}
@@ -925,33 +965,19 @@ function ConnectionRow({
             />
           ) : (
             <div className="flex items-center gap-3">
-              {window.endurance && (
-                <Button
-                  aria-label={`Test ${connection.label} connection`}
-                  className="h-7 shrink-0 gap-1.5 rounded-[6px] px-2.5 text-[12px]"
-                  disabled={testing || Boolean(headersError) || Boolean(addressRefusal)}
-                  onClick={() => void test()}
-                  type="button"
-                  variant="secondary"
-                >
-                  {testing && <LoaderCircleIcon className="size-3.5 animate-spin" />}
-                  Test
+              {/* Removing sits apart from Save, at the opposite end, so it is not pressed by mistake. */}
+              {!connection.primary && window.endurance && (
+                <Button className="h-7 shrink-0 rounded-[6px] text-[12px]" onClick={() => setConfirmRemove(true)} type="button" variant="destructive">
+                  Remove Connection
                 </Button>
               )}
-              <p
-                aria-live="polite"
-                className={cn("flex min-w-0 flex-1 items-center gap-1.5 text-[12px] leading-[1.35] text-muted-foreground transition-opacity duration-150", probe ? "opacity-100" : "opacity-0")}
-                role="status"
-                title={result}
-              >
-                {probe && <Dot state={probe.ok ? "testing-ok" : probe.reason === "starting" ? "starting" : "testing-bad"} />}
-                <span className="truncate tabular-nums">{result}</span>
-              </p>
+              <div className="flex-1" />
               <Button className="h-7 shrink-0 rounded-[6px] text-[12px]" onClick={() => onOpenChange(false)} type="button" variant="ghost">
                 Cancel
               </Button>
-              <Button className="h-7 shrink-0 rounded-[6px] text-[12px]" disabled={saving || Boolean(headersError) || Boolean(addressRefusal)} type="submit">
-                Save
+              <Button className="h-7 shrink-0 gap-1.5 rounded-[6px] text-[12px]" disabled={saving} type="submit">
+                {saving && <LoaderCircleIcon className="size-3.5 animate-spin" />}
+                {saving ? "Saving…" : "Save"}
               </Button>
             </div>
           )}
@@ -961,42 +987,26 @@ function ConnectionRow({
   );
 }
 
-/** What was read from the pasted text, shown before anything is sent. Secret values stay masked. */
-function ParsedChips({ parsed }: { parsed: ParsedServer }) {
-  let host = "";
-  let path = "";
-  try {
-    const url = new URL(parsed.baseUrl);
-    host = url.host;
-    path = url.pathname === "/" ? "" : url.pathname;
-  } catch {
-    return null;
-  }
-  const chips = [
-    host + path,
-    locationLabel(classifyHost(new URL(parsed.baseUrl).hostname)),
-    parsed.apiKey ? `Key ••••${parsed.apiKey.slice(-4)}` : undefined,
-    Object.keys(parsed.headers).length ? `${Object.keys(parsed.headers).length} ${Object.keys(parsed.headers).length === 1 ? "header" : "headers"}` : undefined,
-    parsed.query ? "Signed address" : undefined,
-  ].filter(Boolean);
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {chips.map((chip) => (
-        <span className="inline-flex h-5 max-w-full items-center truncate rounded-full bg-muted px-2 font-mono text-[11.5px] text-foreground/85" key={chip}>
-          {chip}
-        </span>
-      ))}
-    </div>
-  );
-}
-
 /**
- * One field for any server: paste a URL or a curl command, then Connect. The main process reads it again,
- * finds the API base and the runtime, and saves it when it answers or is starting. A key field appears
- * only when the server asks for one.
+ * Adds a server from one field: a URL or a curl command, whose key, headers and signed query are read. The main
+ * process reads it again. With a runtime chosen from the menu, the address starts as that runtime's default and
+ * the server is saved as that runtime even before it runs. Without one, the server's own answer decides, and
+ * it is saved only when it answers or is starting. A key field appears only when the server asks for one.
  */
-function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionView) => void; onCancel: () => void }) {
-  const [input, setInput] = useState("");
+function AddServerForm({
+  runtime,
+  defaultName,
+  onDone,
+  onCancel,
+}: {
+  runtime?: RuntimeId;
+  /** The name the server gets when none is typed; otherwise its host name is used. */
+  defaultName?: string;
+  onDone: (connection: ConnectionView) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [input, setInput] = useState<string>(() => (runtime ? (RUNTIMES.find((item) => item.id === runtime)?.baseUrl ?? "") : ""));
   const [key, setKey] = useState("");
   const [headersText, setHeadersText] = useState("");
   const [advanced, setAdvanced] = useState(false);
@@ -1005,7 +1015,12 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
   const [check, setCheck] = useState<ServerCheck | null>(null);
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => inputRef.current?.focus(), []);
+  // A prefilled address takes the caret at its end, ready to change the port.
+  useEffect(() => {
+    const field = inputRef.current;
+    field?.focus();
+    field?.setSelectionRange(field.value.length, field.value.length);
+  }, []);
   let parsed: ParsedServer | null = null;
   let parseError = "";
   if (input.trim()) {
@@ -1017,11 +1032,14 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
   }
   const headers = headersText.trim() ? parseHeaders(headersText) : { headers: {} };
   const headersError = "error" in headers ? headers.error : "";
+  // Problems with what is typed show once Add or Connect is pressed, not while typing, and editing clears them.
+  const [tried, setTried] = useState(false);
   const unresolved = parsed?.unresolved ?? [];
   const showKey = needsKey || unresolved.length > 0;
   const keyId = "add-server-key";
 
   const connect = async () => {
+    setTried(true);
     if (!window.endurance || !parsed || headersError || busy) return;
     setBusy(true);
     setError("");
@@ -1031,6 +1049,8 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
         input,
         ...(key.trim() ? { apiKey: key.trim() } : {}),
         ...("headers" in headers && Object.keys(headers.headers).length ? { headers: headers.headers } : {}),
+        ...(runtime ? { runtime } : {}),
+        ...(name.trim() ? { name: name.trim() } : {}),
       });
       setCheck(result);
       if (result.connection) onDone(result.connection);
@@ -1049,7 +1069,7 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
         ? key.trim() || parsed?.apiKey
           ? "The server rejected this API key."
           : "This server needs an API key."
-        : `${reasonText(check.probe.reason, Boolean(key.trim()), check.probe.status, check.probe.detected)}. Check the address and try again.`
+        : (saveProblem(check.probe, Boolean(key.trim())) ?? "Couldn't add this server.")
       : "";
 
   return (
@@ -1066,11 +1086,25 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
       {/* Opens in place of the "Add server" row, so the title stays where it was clicked. */}
       <div className="flex items-center gap-2 p-3 text-[13px] leading-[1.4]">
         <PlusIcon className="size-3.5 text-muted-foreground" />
-        Add server
+        {runtime ? `Add ${runtimeName(runtime)}` : "Add server"}
       </div>
       <div className="space-y-4 px-3 pt-1 pb-3">
+        {/* Optional, so its placeholder is the name used when it stays empty. Same order as a server's own settings. */}
         <div className="space-y-1.5">
-          <label className="text-[12px] leading-[1.35] text-muted-foreground" htmlFor="add-server-input">
+          <label className="block px-1.5 text-[12px] leading-[1.35] text-muted-foreground" htmlFor="add-server-name">
+            Name
+          </label>
+          <Input
+            className="rounded-[6px] text-[13px]"
+            id="add-server-name"
+            maxLength={80}
+            onChange={(event) => setName(event.target.value)}
+            placeholder={defaultName ?? (parsed ? hostOf(parsed.baseUrl) : "")}
+            value={name}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <label className="block px-1.5 text-[12px] leading-[1.35] text-muted-foreground" htmlFor="add-server-input">
             Server address or curl command
           </label>
           <textarea
@@ -1081,6 +1115,7 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
               setInput(event.target.value);
               setCheck(null);
               setError("");
+              setTried(false);
             }}
             onKeyDown={(event) => {
               // Enter connects; Shift+Enter keeps a multi-line curl command.
@@ -1095,19 +1130,18 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
             spellCheck={false}
             value={input}
           />
-          {parsed && <ParsedChips parsed={parsed} />}
-          {parseError && <p className="text-[12px] leading-[1.35] text-destructive">{parseError}</p>}
+          {tried && parseError && <p className="px-1.5 text-[12px] leading-[1.35] text-destructive">{parseError}</p>}
         </div>
         {showKey && (
           <div className="space-y-1.5">
-            <label className="text-[12px] leading-[1.35] text-muted-foreground" htmlFor={keyId}>
+            <label className="block px-1.5 text-[12px] leading-[1.35] text-muted-foreground" htmlFor={keyId}>
               API key
             </label>
             <Input
               autoCapitalize="off"
               autoComplete="off"
               autoFocus={needsKey}
-              className="font-mono text-[13px]"
+              className="rounded-[6px] font-mono text-[13px]"
               id={keyId}
               onChange={(event) => setKey(event.target.value)}
               spellCheck={false}
@@ -1115,7 +1149,7 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
               value={key}
             />
             {unresolved.length > 0 && (
-              <p className="!mt-1 text-[12px] leading-[1.35] text-muted-foreground">
+              <p className="!mt-1 px-1.5 text-[12px] leading-[1.35] text-muted-foreground">
                 The command uses {unresolved.map((name) => `$${name}`).join(", ")}. Paste the key here, or replace the variable in the command with its value.
               </p>
             )}
@@ -1124,7 +1158,7 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
         <div>
           <button
             aria-expanded={advanced}
-            className="flex items-center gap-1 text-[12px] leading-[1.35] text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground"
+            className="flex items-center gap-1 px-1.5 text-[12px] leading-[1.35] text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground"
             onClick={() => setAdvanced((value) => !value)}
             type="button"
           >
@@ -1133,27 +1167,30 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
           </button>
           <Collapse open={advanced}>
             <div className="space-y-1.5 pt-3">
-              <label className="text-[12px] leading-[1.35] text-muted-foreground" htmlFor="add-server-headers">
+              <label className="block px-1.5 text-[12px] leading-[1.35] text-muted-foreground" htmlFor="add-server-headers">
                 Extra headers
               </label>
               <textarea
-                aria-invalid={Boolean(headersError)}
+                aria-invalid={tried && Boolean(headersError)}
                 className="block min-h-14 w-full resize-y rounded-[6px] border border-input bg-transparent px-2.5 py-2 font-mono text-[12px] leading-[1.5] outline-none placeholder:text-muted-foreground focus-visible:border-ring/70 aria-invalid:border-destructive dark:bg-input/30"
                 id="add-server-headers"
-                onChange={(event) => setHeadersText(event.target.value)}
+                onChange={(event) => {
+                  setHeadersText(event.target.value);
+                  setTried(false);
+                }}
                 placeholder="Name: value"
                 rows={2}
                 spellCheck={false}
                 value={headersText}
               />
-              <p className={cn("!mt-1 text-[12px] leading-[1.35]", headersError ? "text-destructive" : "text-muted-foreground")}>
-                {headersError || "Headers in a pasted curl command are read automatically."}
+              <p className={cn("!mt-1 px-1.5 text-[12px] leading-[1.35]", tried && headersError ? "text-destructive" : "text-muted-foreground")}>
+                {(tried && headersError) || "Headers in a pasted curl command are read automatically."}
               </p>
             </div>
           </Collapse>
         </div>
         {(outcome || error) && (
-          <p aria-live="polite" className="text-[12px] leading-[1.35] text-destructive" role="alert">
+          <p aria-live="polite" className="px-1.5 text-[12px] leading-[1.35] text-destructive" role="alert">
             {error || outcome}
           </p>
         )}
@@ -1161,9 +1198,9 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
           <Button className="h-7 rounded-[6px] text-[12px]" onClick={onCancel} type="button" variant="ghost">
             Cancel
           </Button>
-          <Button className="h-7 gap-1.5 rounded-[6px] text-[12px]" disabled={!parsed || busy || Boolean(headersError)} type="submit">
+          <Button className="h-7 gap-1.5 rounded-[6px] text-[12px]" disabled={!input.trim() || busy} type="submit">
             {busy && <LoaderCircleIcon className="size-3.5 animate-spin" />}
-            {busy ? "Connecting…" : "Connect"}
+            {busy ? (runtime ? "Adding…" : "Connecting…") : runtime ? "Add" : "Connect"}
           </Button>
         </div>
       </div>
@@ -1172,10 +1209,18 @@ function AddServerForm({ onDone, onCancel }: { onDone: (connection: ConnectionVi
 }
 
 export function ConnectionsSettings() {
-  const { connections, runtimeCatalog, refreshModels, addRuntime, detectRuntimes } = useStore();
-  const more = RUNTIMES.filter((item) => item.baseUrl && !connections.some((connection) => connection.id === item.id));
+  const { connections, runtimeCatalog, refreshModels } = useStore();
+  const [found, setFound] = useState<FoundServer[]>([]);
+  // A suggestion for an address that has since been listed (added elsewhere, or by detection) is dropped.
+  const suggestions = found.filter((server) => !connections.some((item) => item.baseUrl.replace(/\/+$/, "") === server.baseUrl.replace(/\/+$/, "")));
+  const detect = useCallback(() => {
+    window.endurance?.detect().then(setFound).catch(() => {});
+  }, []);
+  // Every runtime can be added again for another address; the menu names them only, since a port says nothing.
+  const choices = RUNTIMES.filter((item) => item.baseUrl);
   const [panel, setPanel] = useState<{ id: string; kind: Panel } | null>(null);
-  const [adding, setAdding] = useState(false);
+  // The form is open for a chosen runtime, or "url" for an address the server identifies itself.
+  const [adding, setAdding] = useState<RuntimeId | "url" | null>(null);
   const [justAdded, setJustAdded] = useState<string | null>(null);
   const [ollama, setOllama] = useState<OllamaStatus | null>(null);
   // The order just dragged, shown until the saved list comes back in it.
@@ -1202,12 +1247,12 @@ export function ConnectionsSettings() {
   useEffect(() => {
     const refresh = () => {
       refreshModels();
-      detectRuntimes();
+      detect();
     };
     refresh();
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
-  }, [refreshModels, detectRuntimes]);
+  }, [refreshModels, detect]);
 
   return (
     <PageScroll>
@@ -1242,14 +1287,39 @@ export function ConnectionsSettings() {
             />
           ))}
           </Reorderable>
+          {suggestions.map((server) => (
+            <FoundRow
+              key={server.baseUrl}
+              onAdd={() => {
+                setFound((list) => list.filter((item) => item !== server));
+                window.endurance
+                  ?.addFound(server.baseUrl)
+                  .then((connection) => {
+                    if (!connection) return;
+                    setJustAdded(connection.id);
+                    setPanel({ id: connection.id, kind: "settings" });
+                  })
+                  .catch((error: Error) => toast.error("Couldn't add this server", { description: ipcMessage(error) }));
+              }}
+              onDismiss={() => {
+                setFound((list) => list.filter((item) => item !== server));
+                window.endurance?.ignoreFound(server.baseUrl).catch(() => {});
+              }}
+              server={server}
+            />
+          ))}
           {adding && (
             <AddServerForm
-              onCancel={() => setAdding(false)}
+              key={adding}
+              onCancel={() => setAdding(null)}
               onDone={(connection) => {
-                setAdding(false);
+                setAdding(null);
                 setJustAdded(connection.id);
-                setPanel({ id: connection.id, kind: "settings" });
+                // A runtime that is not answering yet opens its setup steps; anything else opens its settings.
+                setPanel({ id: connection.id, kind: connection.builtin ? "setup" : "settings" });
               }}
+              defaultName={adding !== "url" && !connections.some((item) => item.id === adding) ? runtimeName(adding) : undefined}
+              runtime={adding === "url" ? undefined : adding}
             />
           )}
           {!adding && window.endurance && (
@@ -1266,21 +1336,13 @@ export function ConnectionsSettings() {
                 Add server
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-72 p-1" sideOffset={4}>
-                {more.map((item) => (
-                  <DropdownMenuItem
-                    className="h-[26px] justify-between gap-4 rounded-md py-0 text-[13px] font-normal"
-                    key={item.id}
-                    onClick={() => {
-                      addRuntime(item.id);
-                      setPanel({ id: item.id, kind: "setup" });
-                    }}
-                  >
+                {choices.map((item) => (
+                  <DropdownMenuItem className="h-[26px] rounded-md py-0 text-[13px] font-normal" key={item.id} onClick={() => setAdding(item.id)}>
                     <span className="truncate">{item.name}</span>
-                    <span className="shrink-0 font-mono text-[12px] text-muted-foreground tabular-nums">:{new URL(item.baseUrl).port}</span>
                   </DropdownMenuItem>
                 ))}
-                {more.length > 0 && <DropdownMenuSeparator />}
-                <DropdownMenuItem className="h-[26px] gap-4 rounded-md py-0 text-[13px] font-normal" onClick={() => setAdding(true)}>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem className="h-[26px] gap-4 rounded-md py-0 text-[13px] font-normal" onClick={() => setAdding("url")}>
                   <span className="truncate">Server URL…</span>
                   <span className="ml-auto shrink-0 text-[12px] text-muted-foreground">URL or curl</span>
                 </DropdownMenuItem>

@@ -61,7 +61,7 @@ export async function webSearch(query: string, signal: AbortSignal, transport: t
   return { query: text, results: answer ? parseResults(answer) : [], raw: answer ?? "" };
 }
 
-/** Hosts a page fetch may not reach: this computer, private networks and link-local metadata services. */
+/** Hosts a page fetch may not reach: localhost, private networks and link-local metadata services. */
 export function publicHost(hostname: string) {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return false;
@@ -93,7 +93,7 @@ export async function webFetch(input: string, signal: AbortSignal, transport: ty
     throw new Error("Use a full http:// or https:// address.");
   }
   if (!/^https?:$/.test(url.protocol) || url.username || url.password) throw new Error("Use a public http:// or https:// address.");
-  if (!publicHost(url.hostname)) throw new Error("Pages on this computer or a private network cannot be fetched.");
+  if (!publicHost(url.hostname)) throw new Error("Pages on localhost or a private network cannot be fetched.");
   const response = await transport(url, {
     headers: {
       "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",

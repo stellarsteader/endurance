@@ -266,7 +266,7 @@ const fromSession = (session: HistorySession): Thread => ({
 const previewConnections = (): ConnectionView[] =>
   PRIMARY_RUNTIMES.map((id) => {
     const connection = defaultConnection(id);
-    return { ...connection, builtin: true, primary: true, label: connectionLabel(connection), host: "127.0.0.1", location: "this-computer", mine: true, secrets: { hasKey: false, headerNames: [] } };
+    return { ...connection, builtin: true, primary: true, label: connectionLabel(connection), host: "127.0.0.1", location: "loopback", selfHosted: true, secrets: { hasKey: false, headerNames: [] } };
   });
 
 /** Connection settings kept in localStorage before the main process owned them; read once to migrate. */
@@ -770,7 +770,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const detectRuntimes = useCallback(() => {
     window.endurance?.detect().catch(() => {});
   }, []);
-  // Servers already running at their default address are listed without the person adding them.
+  // Servers running at a default address whose own endpoints confirm their runtime are listed without the
+  // person adding them. Others are only suggested on the Connections page.
   useEffect(() => {
     detectRuntimes();
   }, [detectRuntimes]);

@@ -150,7 +150,7 @@ export function VoiceSettings() {
           </Row>
           {connection && (
             <Row hint="Each recording is sent there to be transcribed. Endurance doesn't keep recordings." label="Where recordings go">
-              <span className={cn("truncate text-[13px] leading-[1.4]", connection.location === "remote" ? "text-foreground" : "text-muted-foreground")}>
+              <span className={cn("truncate text-[13px] leading-[1.4]", connection.location === "public" ? "text-foreground" : "text-muted-foreground")}>
                 {connection.label} · {locationLabel(connection.location)}
               </span>
             </Row>
