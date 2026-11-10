@@ -784,7 +784,7 @@ function ConnectionRow({
             void save();
           }}
         >
-          <div className="space-y-1.5">
+          <div className="space-y-px">
             <label className="block px-1.5 text-[12px] leading-[1.35] text-muted-foreground" htmlFor={`${formId}-name`}>
               Name
             </label>
@@ -799,7 +799,7 @@ function ConnectionRow({
               value={name}
             />
           </div>
-          <div className="space-y-1.5">
+          <div className="space-y-px">
             <div className="flex items-center justify-between px-1.5">
               <label className="text-[12px] leading-[1.35] text-muted-foreground" htmlFor={`${formId}-address`}>
                 API address
@@ -841,7 +841,7 @@ function ConnectionRow({
               </label>
             )}
           </div>
-          <div className="space-y-1.5">
+          <div className="space-y-px">
             <div className="flex items-center justify-between px-1.5">
               <label className="text-[12px] leading-[1.35] text-muted-foreground" htmlFor={`${formId}-key`}>
                 API key
@@ -877,7 +877,7 @@ function ConnectionRow({
               </div>
               <Collapse open={advanced}>
                 <div className="space-y-4 pt-3">
-                  <div className="space-y-1.5">
+                  <div className="space-y-px">
                     <div className="flex items-center justify-between px-1.5">
                       <label className="text-[12px] leading-[1.35] text-muted-foreground" htmlFor={`${formId}-headers`}>
                         Extra headers
@@ -1090,7 +1090,7 @@ function AddServerForm({
       </div>
       <div className="space-y-4 px-3 pt-1 pb-3">
         {/* Optional, so its placeholder is the name used when it stays empty. Same order as a server's own settings. */}
-        <div className="space-y-1.5">
+        <div className="space-y-px">
           <label className="block px-1.5 text-[12px] leading-[1.35] text-muted-foreground" htmlFor="add-server-name">
             Name
           </label>
@@ -1103,7 +1103,7 @@ function AddServerForm({
             value={name}
           />
         </div>
-        <div className="space-y-1.5">
+        <div className="space-y-px">
           <label className="block px-1.5 text-[12px] leading-[1.35] text-muted-foreground" htmlFor="add-server-input">
             Server address or curl command
           </label>
@@ -1133,7 +1133,7 @@ function AddServerForm({
           {tried && parseError && <p className="px-1.5 text-[12px] leading-[1.35] text-destructive">{parseError}</p>}
         </div>
         {showKey && (
-          <div className="space-y-1.5">
+          <div className="space-y-px">
             <label className="block px-1.5 text-[12px] leading-[1.35] text-muted-foreground" htmlFor={keyId}>
               API key
             </label>
@@ -1166,7 +1166,7 @@ function AddServerForm({
             <ChevronDownIcon className={cn("size-3.5 transition-transform duration-200 motion-reduce:transition-none", advanced && "rotate-180")} />
           </button>
           <Collapse open={advanced}>
-            <div className="space-y-1.5 pt-3">
+            <div className="space-y-px pt-3">
               <label className="block px-1.5 text-[12px] leading-[1.35] text-muted-foreground" htmlFor="add-server-headers">
                 Extra headers
               </label>
